@@ -32,7 +32,7 @@ run :: proc "c" (state: ^lua.State) -> i32 {
         return 0
     }
 
-    spawn_process(string(lua.tostring(state, 1)))
+    spawn_and_run_process(string(lua.tostring(state, 1)))
 
     return 0
 }
