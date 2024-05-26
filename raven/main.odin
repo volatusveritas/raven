@@ -2,6 +2,8 @@ package raven
 
 import "base:runtime"
 import "core:fmt"
+import "core:os"
+import "core:strings"
 
 import lua "vendor:lua/5.4"
 
@@ -80,6 +82,10 @@ main :: proc() {
     lua.pushcfunction(lua_state, lua_runf)
     lua.setglobal(lua_state, "runf")
 
+    // Explose global cmd table
+    lua.newtable(lua_state)
+    lua.setglobal(lua_state, "cmd")
+
     // TODO(volatus): runf -> run(string.format(...))
 
     // Execute ravenfile.lua
@@ -102,5 +108,26 @@ main :: proc() {
         }
 
         return
+    }
+
+    // Explose the args table
+    lua.createtable(lua_state, i32(len(os.args) - 2), 0)
+
+    if len(os.args) > 2 {
+        for i in 2..<len(os.args) {
+            lua.pushstring(lua_state, strings.clone_to_cstring(os.args[i]))
+            lua.seti(lua_state, -2, lua.Integer(i - 1))
+        }
+    }
+
+    lua.setglobal(lua_state, "args")
+
+    if len(os.args) > 1 {
+        // Call the subcommand
+        lua.getglobal(lua_state, "cmd")
+        lua.getfield(lua_state, -1, strings.clone_to_cstring(os.args[1]))
+        lua.remove(lua_state, -2)
+        lua.getglobal(lua_state, "args")
+        lua.call(lua_state, 1, 0)
     }
 }
