@@ -95,5 +95,5 @@ spawn_and_run_process :: proc(cmd: string) {
         nil,
     )
 
-    fmt.print(transmute(string)read_buffer[:amount_read])
+    fmt.println(transmute(string)read_buffer[:amount_read])
 }
