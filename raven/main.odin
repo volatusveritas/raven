@@ -1,5 +1,7 @@
 package raven
 
+// TODO(volatus): add capturing the stdout of a program and return code
+
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
@@ -12,7 +14,7 @@ error :: proc(msg: string, args: ..any) {
     full_msg := (len(args) > 0) ? fmt.aprintf(msg, args) : msg
     defer delete(full_msg)
 
-    fmt.eprintf("Error: %s.", full_msg)
+    fmt.eprintfln("Error: %s.\n", full_msg)
 }
 
 lua_expect_argument_amount :: proc "c" (state: ^lua.State, amount: i32, method_name: string) -> bool {
