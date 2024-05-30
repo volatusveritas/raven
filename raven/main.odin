@@ -1,6 +1,6 @@
 package raven
 
-// TODO(volatus): add capturing the stdout of a program and return code
+// TODO(volatus): have an array of args passed to run instead of a single string construct.
 
 import "base:runtime"
 import "core:fmt"
@@ -53,9 +53,23 @@ lua_run :: proc "c" (state: ^lua.State) -> i32 {
     if !lua_expect_string_strict(state, 1, "run") do return 0
     if !lua_expect_not_empty(state, 1, "run") do return 0
 
-    spawn_and_run_process(string(lua.tostring(state, 1)))
+    success, exit_code, output, error_output := spawn_and_run_process(string(lua.tostring(state, 1)))
 
-    return 0
+    lua.createtable(state, 0, 4)
+
+    lua.pushboolean(state, b32(success))
+    lua.setfield(state, -2, "success")
+
+    lua.pushinteger(state, lua.Integer(exit_code))
+    lua.setfield(state, -2, "exit_code")
+
+    lua.pushstring(state, output)
+    lua.setfield(state, -2, "output")
+
+    lua.pushstring(state, error_output)
+    lua.setfield(state, -2, "error_output")
+
+    return 1
 }
 
 lua_runf :: proc "c" (state: ^lua.State) -> i32 {

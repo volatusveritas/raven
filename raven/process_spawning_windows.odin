@@ -7,6 +7,7 @@ import "core:sys/windows"
 import "core:unicode/utf16"
 import "core:unicode/utf8"
 
+EXIT_CODE_STILL_ACTIVE :: 259
 PIPE_BUFFER_SIZE :: 4096
 
 print_last_error_message :: proc() {
@@ -17,19 +18,25 @@ print_last_error_message :: proc() {
         | windows.FORMAT_MESSAGE_MAX_WIDTH_MASK
     )
 
+    error_code := windows.GetLastError()
+
     p: rawptr
-    message_length := windows.FormatMessageW(error_message_flags, nil, windows.GetLastError(), 0, (^u16)(&p), 0, nil)
+    message_length := windows.FormatMessageW(error_message_flags, nil, error_code, 0, (^u16)(&p), 0, nil)
 
     if message_length == 0 || p == nil {
         error("Raven was unable to format a Windows error message (FormatMessageW error, code %d)", windows.GetLastError())
         return
     }
 
-    error_message := slice.from_ptr((^u16)(p), int(message_length))
-    error("[Windows] %s", windows.utf16_to_utf8(error_message))
+    error("[Windows, ERR %d] %s", error_code, ([^]u16)(p))
 }
 
-spawn_and_run_process :: proc(cmd: string) {
+spawn_and_run_process :: proc(cmd: string) -> (
+    process_success: bool,
+    process_exit_code: u32,
+    process_output: cstring,
+    process_error_output: cstring
+) {
     wide_cmd_buf := make([]u16, utf8.rune_count(cmd))
     utf16.encode_string(wide_cmd_buf, cmd)
 
@@ -100,19 +107,56 @@ spawn_and_run_process :: proc(cmd: string) {
         return
     }
 
-    read_buffer := make([]byte, PIPE_BUFFER_SIZE)
-    amount_read: u32
+    for {
+        if !windows.GetExitCodeProcess(process_info.hProcess, &process_exit_code) {
+            print_last_error_message()
+            return
+        }
+
+        if process_exit_code != EXIT_CODE_STILL_ACTIVE {
+            break
+        }
+    }
+
+    out_read_buffer := make([]byte, PIPE_BUFFER_SIZE + 1)
+    out_amount_read: u32
 
     if !windows.ReadFile(
         stdout_read_handle,
-        raw_data(read_buffer),
+        raw_data(out_read_buffer),
         PIPE_BUFFER_SIZE,
-        &amount_read,
+        &out_amount_read,
         nil,
-    ) {
+    ) && windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
         print_last_error_message()
         return
     }
 
-    fmt.println(transmute(string)read_buffer[:amount_read])
+    if out_amount_read > 0 {
+        process_output = cstring(raw_data(out_read_buffer))
+        fmt.println(process_output)
+    }
+
+    err_read_buffer := make([]byte, PIPE_BUFFER_SIZE + 1)
+    err_amount_read: u32
+
+    if !windows.ReadFile(
+        stderr_read_handle,
+        raw_data(err_read_buffer),
+        PIPE_BUFFER_SIZE,
+        &err_amount_read,
+        nil,
+    ) && windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
+        print_last_error_message()
+        return
+    }
+
+    if err_amount_read > 0 {
+        process_error_output = cstring(raw_data(err_read_buffer))
+        fmt.eprintln(process_error_output)
+    }
+
+    process_success = process_exit_code == 0
+
+    return
 }
