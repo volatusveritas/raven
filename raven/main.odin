@@ -11,7 +11,7 @@ import "core:strings"
 import lua "vendor:lua/5.4"
 
 error :: proc(msg: string, args: ..any) {
-    full_msg := (len(args) > 0) ? fmt.aprintf(msg, args) : msg
+    full_msg := (len(args) > 0) ? fmt.aprintf(msg, ..args) : msg
     defer delete(full_msg)
 
     fmt.eprintfln("Error: %s.\n", full_msg)
