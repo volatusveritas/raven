@@ -1,7 +1,5 @@
 package raven
 
-// TODO(volatus): have an array of args passed to run instead of a single string construct.
-
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
@@ -11,7 +9,7 @@ import "core:strings"
 import lua "vendor:lua/5.4"
 
 error :: proc(msg: string, args: ..any) {
-    full_msg := (len(args) > 0) ? fmt.aprintf(msg, ..args) : msg
+    full_msg := fmt.aprintf(msg, ..args)
     defer delete(full_msg)
 
     fmt.eprintfln("Error: %s.\n", full_msg)
@@ -46,14 +44,10 @@ lua_expect_not_empty :: proc "c" (state: ^lua.State, index: i32, method_name: st
     return true
 }
 
-lua_run :: proc "c" (state: ^lua.State) -> i32 {
+lua_spawn_and_return_process :: proc "c" (state: ^lua.State, cmd: cstring, args: ..cstring) -> i32 {
     context = runtime.default_context()
 
-    if !lua_expect_argument_amount(state, 1, "run") do return 0
-    if !lua_expect_string_strict(state, 1, "run") do return 0
-    if !lua_expect_not_empty(state, 1, "run") do return 0
-
-    success, exit_code, output, error_output := spawn_and_run_process(string(lua.tostring(state, 1)))
+    success, exit_code, output, error_output := spawn_and_run_process(cmd, ..args)
 
     lua.createtable(state, 0, 4)
 
@@ -72,12 +66,20 @@ lua_run :: proc "c" (state: ^lua.State) -> i32 {
     return 1
 }
 
-lua_runf :: proc "c" (state: ^lua.State) -> i32 {
-    args_amount := lua.gettop(state)
+lua_run :: proc "c" (state: ^lua.State) -> i32 {
+    if !lua_expect_argument_amount(state, 1, "run") do return 0
+    if !lua_expect_string_strict(state, 1, "run") do return 0
+    if !lua_expect_not_empty(state, 1, "run") do return 0
 
+    return lua_spawn_and_return_process(state, lua.tostring(state, 1))
+}
+
+lua_runf :: proc "c" (state: ^lua.State) -> i32 {
     if !lua_expect_argument_amount(state, 1, "runf") do return 0
     if !lua_expect_string_strict(state, 1, "runf") do return 0
     if !lua_expect_not_empty(state, 1, "runf") do return 0
+
+    args_amount := lua.gettop(state)
 
     lua.getglobal(state, "string")
     lua.getfield(state, -1, "format")
@@ -85,9 +87,32 @@ lua_runf :: proc "c" (state: ^lua.State) -> i32 {
     lua.rotate(state, 1, 1)
     lua.call(state, args_amount, 1)
 
-    lua_run(state)
+    return lua_spawn_and_return_process(state, lua.tostring(state, 1), nil)
+}
 
-    return 0
+lua_runa :: proc "c" (state: ^lua.State) -> i32 {
+    if !lua_expect_argument_amount(state, 1, "runa") do return 0
+
+    args_amount := lua.gettop(state)
+
+    for i in 1..=args_amount {
+        if !lua_expect_string_strict(state, i, "runa") do return 0
+        if !lua_expect_not_empty(state, i, "runa") do return 0
+    }
+
+    cmd := lua.tostring(state, 1)
+
+    context = runtime.default_context()
+
+    args := make([]cstring, args_amount - 1)
+
+    if args_amount > 1 {
+        for i in 2..=args_amount {
+            args[i - 2] = lua.tostring(state, i)
+        }
+    }
+
+    return lua_spawn_and_return_process(state, cmd, ..args)
 }
 
 lua_atpanic :: proc "c" (state: ^lua.State) -> i32 {
@@ -112,6 +137,8 @@ lua_atpanic :: proc "c" (state: ^lua.State) -> i32 {
         error("[Lua] thread <%v>", lua.topointer(state, -1))
     case .FUNCTION:
         error("[Lua] function <%v>", lua.topointer(state, -1))
+    case:
+        error("[Lua] unknown error")
     }
 
     return 0
@@ -152,6 +179,9 @@ start_lua_environment :: proc() -> ^lua.State {
 
     lua.pushcfunction(state, lua_runf)
     lua.setglobal(state, "runf")
+
+    lua.pushcfunction(state, lua_runa)
+    lua.setglobal(state, "runa")
 
     // Explose global cmd table
     lua.newtable(state)

@@ -3,6 +3,7 @@ package raven
 import "core:fmt"
 import "core:math"
 import "core:slice"
+import "core:strings"
 import "core:sys/windows"
 import "core:unicode/utf16"
 import "core:unicode/utf8"
@@ -31,15 +32,42 @@ print_last_error_message :: proc() {
     error("[Windows, ERR %d] %s", error_code, ([^]u16)(p))
 }
 
-spawn_and_run_process :: proc(cmd: string) -> (
+escape_command_arg :: proc(arg: string) -> string {
+    quote_count := 0
+
+    for i in 0..<len(arg) {
+        if arg[i] == '"' {
+            quote_count += 1
+        }
+    }
+
+    buf := make([]byte, len(arg) + quote_count + 2)
+
+    buf[0] = '"'
+    buf[len(buf) - 1] = '"'
+
+    str_buf := buf[1:]
+
+    for i := 0; i < len(arg); i += 1 {
+        if arg[i] == '"' {
+            str_buf[i] = '\\'
+            str_buf[i + 1] = '"'
+
+            i += 1
+        } else {
+            str_buf[i] = arg[i]
+        }
+    }
+
+    return string(buf)
+}
+
+spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     process_success: bool,
     process_exit_code: u32,
     process_output: cstring,
     process_error_output: cstring
 ) {
-    wide_cmd_buf := make([]u16, utf8.rune_count(cmd))
-    utf16.encode_string(wide_cmd_buf, cmd)
-
     security_attributes := windows.SECURITY_ATTRIBUTES {
         nLength = size_of(windows.SECURITY_ATTRIBUTES),
         lpSecurityDescriptor = nil,
@@ -79,11 +107,20 @@ spawn_and_run_process :: proc(cmd: string) -> (
         dwFlags = windows.STARTF_USESTDHANDLES,
     }
 
-    fmt.println(cmd)
+    cmdline_components := make([]string, len(args) + 1)
+    cmdline_components[0] = (len(args) > 0) ? escape_command_arg(string(cmd)) : string(cmd)
+
+    for arg, i in args {
+        cmdline_components[i + 1] = escape_command_arg(string(arg))
+    }
+
+    command_line := windows.utf8_to_utf16(strings.join(cmdline_components, " "))
+
+    fmt.printfln("%s", command_line)
 
     if !windows.CreateProcessW(
         nil,
-        &wide_cmd_buf[0],
+        raw_data(command_line),
         nil,
         nil,
         true,
