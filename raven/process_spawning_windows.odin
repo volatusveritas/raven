@@ -45,27 +45,25 @@ print_last_error_message :: proc() {
 
 // TODO(volatus): fix usage of this in spawn_process
 escape_command_arg :: proc(arg: string) -> string {
-    builder := strings.builder_make(len(arg), len(arg)*2)
+    builder := strings.builder_make(0, len(arg)*2)
 
     escaped := false
 
     for i := 0; i < len(arg); i += 1 {
         char := arg[i]
 
-        strings.write_byte(&builder, char)
-
         if char == '"' {
             strings.write_string(&builder, "\\\"")
             escaped = true
-        } else if char == '\\' && i < len(arg) - 1 {
-            i += 1
-            strings.write_byte(&builder, arg[i])
+        // } else if char == '\\' && i < len(arg) - 1 {
+        //     i += 1
+        //     strings.write_byte(&builder, arg[i])
+        } else {
+            strings.write_byte(&builder, char)
         }
     }
 
-    command_str := strings.to_string(builder)
-
-    return escaped ? fmt.aprintf("\"%s\"", command_str) : command_str
+    return strings.to_string(builder)
 }
 
 create_child_output_pipe :: proc(security_attributes: ^windows.SECURITY_ATTRIBUTES) -> (read_handle, write_handle: windows.HANDLE, success: bool) {
@@ -169,7 +167,7 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     cmdline_components[0] = (len(args) > 0) ? escape_command_arg(string(cmd)) : string(cmd)
 
     for arg, i in args {
-        cmdline_components[i + 1] = string(arg)
+        cmdline_components[i + 1] = escape_command_arg(string(arg))
     }
 
     command_line := windows.utf8_to_utf16(strings.join(cmdline_components, " "))

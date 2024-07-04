@@ -24,7 +24,6 @@ function cmd.install()
     print("Raven [Full] moved to install directory.")
 end
 
-run("odin test raven -out:build/raven_test.exe")
--- runa("odin", "build", "raven", "-out:build/raven_test.exe")
--- run [[odin build "raven" -o:speed -out:build/raven_full.exe]]
--- run [[odin check raven\process_spawning_windows.odin -file]]
+function cmd.test()
+    run("odin test raven -out:build/raven_test.exe")
+end
