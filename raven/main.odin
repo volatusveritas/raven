@@ -47,7 +47,11 @@ lua_expect_not_empty :: proc "c" (state: ^lua.State, index: i32, method_name: st
 lua_spawn_and_return_process :: proc "c" (state: ^lua.State, cmd: cstring, args: ..cstring) -> i32 {
     context = runtime.default_context()
 
-    success, exit_code, output, error_output := spawn_and_run_process(cmd, ..args)
+    success, exit_code, output, error_output, spawn_ok := spawn_and_run_process(cmd, ..args)
+
+    if !spawn_ok {
+        // TODO(volatus): error handling here
+    }
 
     lua.createtable(state, 0, 4)
 

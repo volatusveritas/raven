@@ -1,12 +1,12 @@
 package raven
 
 import "core:fmt"
-import "core:math"
-import "core:slice"
 import "core:strings"
 import "core:sys/windows"
-import "core:unicode/utf16"
-import "core:unicode/utf8"
+import "base:runtime"
+
+// TODO(volatus): stream stdout from process rather than batching it
+// TODO(volatus): stream console stdin to process to allow in-time user input
 
 EXIT_CODE_STILL_ACTIVE :: 259
 PIPE_BUFFER_SIZE :: 4096
@@ -32,41 +32,89 @@ print_last_error_message :: proc() {
     error("[Windows, ERR %d] %s", error_code, ([^]u16)(p))
 }
 
+// TODO(volatus): fix usage of this in spawn_process
 escape_command_arg :: proc(arg: string) -> string {
-    quote_count := 0
+    builder := strings.builder_make(len(arg), len(arg)*2)
 
-    for i in 0..<len(arg) {
-        if arg[i] == '"' {
-            quote_count += 1
-        }
-    }
-
-    buf := make([]byte, len(arg) + quote_count + 2)
-
-    buf[0] = '"'
-    buf[len(buf) - 1] = '"'
-
-    str_buf := buf[1:]
+    escaped := false
 
     for i := 0; i < len(arg); i += 1 {
-        if arg[i] == '"' {
-            str_buf[i] = '\\'
-            str_buf[i + 1] = '"'
+        char := arg[i]
 
+        strings.write_byte(&builder, char)
+
+        if char == '"' {
+            strings.write_string(&builder, "\\\"")
+            escaped = true
+        } else if char == '\\' && i < len(arg) - 1 {
             i += 1
-        } else {
-            str_buf[i] = arg[i]
+            strings.write_byte(&builder, arg[i])
         }
     }
 
-    return string(buf)
+    command_str := strings.to_string(builder)
+
+    return escaped ? fmt.aprintf("\"%s\"", command_str) : command_str
+}
+
+create_child_output_pipe :: proc(security_attributes: ^windows.SECURITY_ATTRIBUTES) -> (read_handle, write_handle: windows.HANDLE, success: bool) {
+    if !windows.CreatePipe(&read_handle, &write_handle, security_attributes, 0) {
+        print_last_error_message()
+        return nil, nil, false
+    }
+
+    if !windows.SetHandleInformation(read_handle, windows.HANDLE_FLAG_INHERIT, 0) {
+        print_last_error_message()
+        return nil, nil, false
+    }
+
+    return read_handle, write_handle, true
+}
+
+get_standard_handle :: proc(standard_handle_number: u32) -> (handle: windows.HANDLE, success: bool) {
+    handle = windows.GetStdHandle(standard_handle_number)
+
+    if handle == nil {
+        error("[Raven] application context has no associated standard output handle")
+        return nil, false
+    }
+
+    if handle == windows.INVALID_HANDLE_VALUE {
+        print_last_error_message()
+        return nil, false
+    }
+
+    return handle, true
+}
+
+close_handle :: proc(handle: windows.HANDLE) -> bool {
+    if !windows.CloseHandle(handle) {
+        print_last_error_message()
+        return false
+    }
+
+    return true
+}
+
+make_child_output_builder :: proc() -> (builder: strings.Builder, success: bool) {
+    builder_err: runtime.Allocator_Error
+
+    builder, builder_err = strings.builder_make(0, PIPE_BUFFER_SIZE)
+
+    if builder_err != .None {
+        error("[Raven] unable to allocate string builder for child process output")
+        return {}, false
+    }
+
+    return builder, true
 }
 
 spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     process_success: bool,
     process_exit_code: u32,
     process_output: cstring,
-    process_error_output: cstring
+    process_error_output: cstring,
+    success: bool,
 ) {
     security_attributes := windows.SECURITY_ATTRIBUTES {
         nLength = size_of(windows.SECURITY_ATTRIBUTES),
@@ -74,29 +122,8 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
         bInheritHandle = true,
     }
 
-    stdout_read_handle, stdout_write_handle: windows.HANDLE
-
-    if !windows.CreatePipe(&stdout_read_handle, &stdout_write_handle, &security_attributes, 0) {
-        print_last_error_message()
-        return
-    }
-
-    if !windows.SetHandleInformation(stdout_read_handle, windows.HANDLE_FLAG_INHERIT, 0) {
-        print_last_error_message()
-        return
-    }
-
-    stderr_read_handle, stderr_write_handle: windows.HANDLE
-
-    if !windows.CreatePipe(&stderr_read_handle, &stderr_write_handle, &security_attributes, 0) {
-        print_last_error_message()
-        return
-    }
-
-    if !windows.SetHandleInformation(stderr_read_handle, windows.HANDLE_FLAG_INHERIT, 0) {
-        print_last_error_message()
-        return
-    }
+    stdout_read_handle, stdout_write_handle := create_child_output_pipe(&security_attributes) or_return
+    stderr_read_handle, stderr_write_handle := create_child_output_pipe(&security_attributes) or_return
 
     process_info: windows.PROCESS_INFORMATION
 
@@ -111,42 +138,88 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     cmdline_components[0] = (len(args) > 0) ? escape_command_arg(string(cmd)) : string(cmd)
 
     for arg, i in args {
-        cmdline_components[i + 1] = escape_command_arg(string(arg))
+        cmdline_components[i + 1] = string(arg)
     }
 
     command_line := windows.utf8_to_utf16(strings.join(cmdline_components, " "))
 
-    fmt.printfln("%s", command_line)
+    fmt.printfln("[Raven] running command: %s", command_line)
 
-    if !windows.CreateProcessW(
-        nil,
-        raw_data(command_line),
-        nil,
-        nil,
-        true,
-        0,
-        nil,
-        nil,
-        &startup_info,
-        &process_info,
-    ) {
+    if !windows.CreateProcessW(nil, raw_data(command_line), nil, nil, true, 0, nil, nil, &startup_info, &process_info) {
         print_last_error_message()
+        success = false
         return
     }
 
-    if !windows.CloseHandle(stdout_write_handle) {
-        print_last_error_message()
-        return
-    }
+    close_handle(stdout_write_handle) or_return
+    close_handle(stderr_write_handle) or_return
 
-    if !windows.CloseHandle(stderr_write_handle) {
-        print_last_error_message()
-        return
+    stdout_builder := make_child_output_builder() or_return
+    stderr_builder := make_child_output_builder() or_return
+
+    console_stdout_handle := get_standard_handle(windows.STD_OUTPUT_HANDLE) or_return
+    console_stderr_handle := get_standard_handle(windows.STD_ERROR_HANDLE) or_return
+
+    // TODO(volatus): stream and capture child process output for stdout and stderr
+
+    read_buffer := make([]byte, PIPE_BUFFER_SIZE)
+    amount_read: u32
+
+    out_handle_closed := false
+    err_handle_closed := false
+
+    for {
+        if out_handle_closed && err_handle_closed {
+            break
+        }
+
+        if !out_handle_closed {
+            if !windows.ReadFile(stdout_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
+                if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
+                    print_last_error_message()
+                    success = false
+                    return
+                }
+
+                // Write handle has been closed, abort reading operations
+                out_handle_closed = true
+            }
+
+            strings.write_bytes(&stdout_builder, read_buffer[:amount_read])
+
+            if !windows.WriteFile(console_stdout_handle, raw_data(read_buffer), amount_read, nil, nil) {
+                print_last_error_message()
+                success = false
+                return
+            }
+        }
+
+        if !err_handle_closed {
+            if !windows.ReadFile(stderr_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
+                if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
+                    print_last_error_message()
+                    success = false
+                    return
+                }
+
+                // Write handle has been closed, abort reading operations
+                err_handle_closed = true
+            }
+
+            strings.write_bytes(&stderr_builder, read_buffer[:amount_read])
+
+            if !windows.WriteFile(console_stderr_handle, raw_data(read_buffer), amount_read, nil, nil) {
+                print_last_error_message()
+                success = false
+                return
+            }
+        }
     }
 
     for {
         if !windows.GetExitCodeProcess(process_info.hProcess, &process_exit_code) {
             print_last_error_message()
+            success = false
             return
         }
 
@@ -155,45 +228,8 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
         }
     }
 
-    out_read_buffer := make([]byte, PIPE_BUFFER_SIZE + 1)
-    out_amount_read: u32
-
-    if !windows.ReadFile(
-        stdout_read_handle,
-        raw_data(out_read_buffer),
-        PIPE_BUFFER_SIZE,
-        &out_amount_read,
-        nil,
-    ) && windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
-        print_last_error_message()
-        return
-    }
-
-    if out_amount_read > 0 {
-        process_output = cstring(raw_data(out_read_buffer))
-        fmt.println(process_output)
-    }
-
-    err_read_buffer := make([]byte, PIPE_BUFFER_SIZE + 1)
-    err_amount_read: u32
-
-    if !windows.ReadFile(
-        stderr_read_handle,
-        raw_data(err_read_buffer),
-        PIPE_BUFFER_SIZE,
-        &err_amount_read,
-        nil,
-    ) && windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
-        print_last_error_message()
-        return
-    }
-
-    if err_amount_read > 0 {
-        process_error_output = cstring(raw_data(err_read_buffer))
-        fmt.eprintln(process_error_output)
-    }
-
     process_success = process_exit_code == 0
+    success = true
 
     return
 }

@@ -1,17 +1,30 @@
-local PROGRAM_NAME = 'raven'
-local BUILD_PATH = 'build'
-
-runf(
-    "odin build %s -out:%s/%s_test.exe",
-    PROGRAM_NAME,
-    BUILD_PATH,
-    PROGRAM_NAME
-)
-
-function cmd.testfunc(args)
-    print("Test function called with")
-
-    for _, arg in ipairs(args) do
-        print(arg)
-    end
+function build_full()
+    return(run("odin build raven -o:speed -out:build/raven_full.exe"))
 end
+
+function install_full()
+    return os.rename([[build/raven_full.exe]], [[D:/Programs/raven/raven.exe]])
+end
+
+function cmd.install()
+    local process = build_full()
+
+    if not process.success then
+        print("build_full failed")
+        return
+    end
+
+    local move_success = install_full()
+
+    if not move_success then
+        print("Failed to move raven")
+        return
+    end
+
+    print("Raven [Full] moved to install directory.")
+end
+
+run("odin test raven -out:build/raven_test.exe")
+-- runa("odin", "build", "raven", "-out:build/raven_test.exe")
+-- run [[odin build "raven" -o:speed -out:build/raven_full.exe]]
+-- run [[odin check raven\process_spawning_windows.odin -file]]
