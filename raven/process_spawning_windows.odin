@@ -5,8 +5,19 @@ import "core:strings"
 import "core:sys/windows"
 import "base:runtime"
 
-// TODO(volatus): stream stdout from process rather than batching it
-// TODO(volatus): stream console stdin to process to allow in-time user input
+foreign import kernel32 "system:Kernel32.lib"
+
+@(default_calling_convention="system")
+foreign kernel32 {
+    PeekNamedPipe :: proc(
+        hNamedPipe: windows.HANDLE,
+        lpBuffer: rawptr,
+        nBufferSize: u32,
+        lpBytesRead: ^u32,
+        lpTotalBytesAvail: ^u32,
+        lpBytesLeftThisMessage: ^u32,
+    ) -> windows.BOOL ---
+}
 
 EXIT_CODE_STILL_ACTIVE :: 259
 PIPE_BUFFER_SIZE :: 4096
@@ -109,6 +120,26 @@ make_child_output_builder :: proc() -> (builder: strings.Builder, success: bool)
     return builder, true
 }
 
+is_pipe_content_available :: proc(handle: windows.HANDLE) -> (is_available, success: bool) {
+    bytes_available: u32
+
+    if !PeekNamedPipe(handle, nil, 0, nil, &bytes_available, nil) {
+        print_last_error_message()
+        return false, false
+    }
+
+    return bytes_available > 0, true
+}
+
+get_process_exit_code :: proc(handle: windows.HANDLE) -> (exit_code: u32, success: bool) {
+    if !windows.GetExitCodeProcess(handle, &exit_code) {
+        print_last_error_message()
+        return 0, false
+    }
+
+    return exit_code, true
+}
+
 spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     process_success: bool,
     process_exit_code: u32,
@@ -160,8 +191,6 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     console_stdout_handle := get_standard_handle(windows.STD_OUTPUT_HANDLE) or_return
     console_stderr_handle := get_standard_handle(windows.STD_ERROR_HANDLE) or_return
 
-    // TODO(volatus): stream and capture child process output for stdout and stderr
-
     read_buffer := make([]byte, PIPE_BUFFER_SIZE)
     amount_read: u32
 
@@ -169,11 +198,17 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     err_handle_closed := false
 
     for {
+        process_exit_code = get_process_exit_code(process_info.hProcess) or_return
+
+        if process_exit_code != EXIT_CODE_STILL_ACTIVE {
+            break
+        }
+
         if out_handle_closed && err_handle_closed {
             break
         }
 
-        if !out_handle_closed {
+        if !out_handle_closed && (is_pipe_content_available(stdout_read_handle) or_return) {
             if !windows.ReadFile(stdout_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
                 if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
                     print_last_error_message()
@@ -183,18 +218,19 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
 
                 // Write handle has been closed, abort reading operations
                 out_handle_closed = true
-            }
+                close_handle(stdout_read_handle) or_return
+            } else {
+                strings.write_bytes(&stdout_builder, read_buffer[:amount_read])
 
-            strings.write_bytes(&stdout_builder, read_buffer[:amount_read])
-
-            if !windows.WriteFile(console_stdout_handle, raw_data(read_buffer), amount_read, nil, nil) {
-                print_last_error_message()
-                success = false
-                return
+                if !windows.WriteFile(console_stdout_handle, raw_data(read_buffer), amount_read, nil, nil) {
+                    print_last_error_message()
+                    success = false
+                    return
+                }
             }
         }
 
-        if !err_handle_closed {
+        if !err_handle_closed && (is_pipe_content_available(stderr_read_handle) or_return) {
             if !windows.ReadFile(stderr_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
                 if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
                     print_last_error_message()
@@ -204,27 +240,16 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
 
                 // Write handle has been closed, abort reading operations
                 err_handle_closed = true
+                close_handle(stderr_read_handle) or_return
+            } else {
+                strings.write_bytes(&stderr_builder, read_buffer[:amount_read])
+
+                if !windows.WriteFile(console_stderr_handle, raw_data(read_buffer), amount_read, nil, nil) {
+                    print_last_error_message()
+                    success = false
+                    return
+                }
             }
-
-            strings.write_bytes(&stderr_builder, read_buffer[:amount_read])
-
-            if !windows.WriteFile(console_stderr_handle, raw_data(read_buffer), amount_read, nil, nil) {
-                print_last_error_message()
-                success = false
-                return
-            }
-        }
-    }
-
-    for {
-        if !windows.GetExitCodeProcess(process_info.hProcess, &process_exit_code) {
-            print_last_error_message()
-            success = false
-            return
-        }
-
-        if process_exit_code != EXIT_CODE_STILL_ACTIVE {
-            break
         }
     }
 
