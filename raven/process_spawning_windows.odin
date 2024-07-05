@@ -138,6 +138,24 @@ get_process_exit_code :: proc(handle: windows.HANDLE) -> (exit_code: u32, succes
     return exit_code, true
 }
 
+redirect_and_capture_pipe :: proc(read_handle, write_handle: windows.HANDLE, read_buffer: [^]byte, capture_builder: ^strings.Builder) -> bool {
+    amount_read: u32
+
+    if !windows.ReadFile(read_handle, read_buffer, PIPE_BUFFER_SIZE, &amount_read, nil) {
+        print_last_error_message()
+        return false
+    }
+
+    strings.write_bytes(capture_builder, read_buffer[:amount_read])
+
+    if !windows.WriteFile(write_handle, read_buffer, amount_read, nil, nil) {
+        print_last_error_message()
+        return false
+    }
+
+    return true
+}
+
 spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     process_success: bool,
     process_exit_code: u32,
@@ -190,10 +208,6 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
     console_stderr_handle := get_standard_handle(windows.STD_ERROR_HANDLE) or_return
 
     read_buffer := make([]byte, PIPE_BUFFER_SIZE)
-    amount_read: u32
-
-    out_handle_closed := false
-    err_handle_closed := false
 
     for {
         process_exit_code = get_process_exit_code(process_info.hProcess) or_return
@@ -202,56 +216,24 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
             break
         }
 
-        if out_handle_closed && err_handle_closed {
-            break
+        stdout_content_available := is_pipe_content_available(stdout_read_handle) or_return
+        stderr_content_available := is_pipe_content_available(stderr_read_handle) or_return
+
+        if stdout_content_available {
+            redirect_and_capture_pipe(stdout_read_handle, console_stdout_handle, raw_data(read_buffer), &stdout_builder) or_return
         }
 
-        if !out_handle_closed && (is_pipe_content_available(stdout_read_handle) or_return) {
-            if !windows.ReadFile(stdout_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
-                if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
-                    print_last_error_message()
-                    success = false
-                    return
-                }
-
-                // Write handle has been closed, abort reading operations
-                out_handle_closed = true
-                close_handle(stdout_read_handle) or_return
-            } else {
-                strings.write_bytes(&stdout_builder, read_buffer[:amount_read])
-
-                if !windows.WriteFile(console_stdout_handle, raw_data(read_buffer), amount_read, nil, nil) {
-                    print_last_error_message()
-                    success = false
-                    return
-                }
-            }
-        }
-
-        if !err_handle_closed && (is_pipe_content_available(stderr_read_handle) or_return) {
-            if !windows.ReadFile(stderr_read_handle, raw_data(read_buffer), PIPE_BUFFER_SIZE, &amount_read, nil) {
-                if windows.GetLastError() != windows.ERROR_BROKEN_PIPE {
-                    print_last_error_message()
-                    success = false
-                    return
-                }
-
-                // Write handle has been closed, abort reading operations
-                err_handle_closed = true
-                close_handle(stderr_read_handle) or_return
-            } else {
-                strings.write_bytes(&stderr_builder, read_buffer[:amount_read])
-
-                if !windows.WriteFile(console_stderr_handle, raw_data(read_buffer), amount_read, nil, nil) {
-                    print_last_error_message()
-                    success = false
-                    return
-                }
-            }
+        if stderr_content_available {
+            redirect_and_capture_pipe(stderr_read_handle, console_stderr_handle, raw_data(read_buffer), &stderr_builder) or_return
         }
     }
 
+    close_handle(stdout_read_handle) or_return
+    close_handle(stderr_read_handle) or_return
+
     process_success = process_exit_code == 0
+    process_output = strings.to_cstring(&stdout_builder)
+    process_error_output = strings.to_cstring(&stderr_builder)
     success = true
 
     return

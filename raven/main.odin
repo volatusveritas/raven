@@ -50,7 +50,7 @@ lua_spawn_and_return_process :: proc "c" (state: ^lua.State, cmd: cstring, args:
     success, exit_code, output, error_output, spawn_ok := spawn_and_run_process(cmd, ..args)
 
     if !spawn_ok {
-        // TODO(volatus): error handling here
+        return 0
     }
 
     lua.createtable(state, 0, 4)
