@@ -169,6 +169,10 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
         bInheritHandle = true,
     }
 
+    console_stdout_handle := get_standard_handle(windows.STD_OUTPUT_HANDLE) or_return
+    console_stderr_handle := get_standard_handle(windows.STD_ERROR_HANDLE) or_return
+    console_input_handle := get_standard_handle(windows.STD_INPUT_HANDLE) or_return
+
     stdout_read_handle, stdout_write_handle := create_child_output_pipe(&security_attributes) or_return
     stderr_read_handle, stderr_write_handle := create_child_output_pipe(&security_attributes) or_return
 
@@ -178,6 +182,7 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
         cb = size_of(windows.STARTUPINFOW),
         hStdOutput = stdout_write_handle,
         hStdError = stderr_write_handle,
+        hStdInput = console_input_handle,
         dwFlags = windows.STARTF_USESTDHANDLES,
     }
 
@@ -203,9 +208,6 @@ spawn_and_run_process :: proc(cmd: cstring, args: ..cstring) -> (
 
     stdout_builder := make_child_output_builder() or_return
     stderr_builder := make_child_output_builder() or_return
-
-    console_stdout_handle := get_standard_handle(windows.STD_OUTPUT_HANDLE) or_return
-    console_stderr_handle := get_standard_handle(windows.STD_ERROR_HANDLE) or_return
 
     read_buffer := make([]byte, PIPE_BUFFER_SIZE)
 
