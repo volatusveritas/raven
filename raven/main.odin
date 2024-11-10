@@ -329,7 +329,7 @@ main :: proc(
     }
 
     if !os.exists("ravenfile.lua") {
-        fmt.eprintln("Error (Raven): ravenfile.lua not found")
+        print_error(.RAVEN, "ravenfile.lua not found")
         return
     }
 
@@ -388,11 +388,11 @@ main :: proc(
     lua.setglobal(state, "raven")
 
     lua.newtable(state)
-    lua.setglobal(state, "command")
+    lua.setglobal(state, "commands")
 
     when MEASURE_PERFORMANCE {
         raven_setup_duration := time.duration_milliseconds(time.since(base_time))
-        fmt.printfln("Setting up Raven environment (raven, raven.args, command) took %fms.", raven_setup_duration)
+        fmt.printfln("Setting up Raven environment (raven, raven.args, commands) took %fms.", raven_setup_duration)
         total_duration_milliseconds += raven_setup_duration
         base_time = time.now()
     }
@@ -430,7 +430,7 @@ main :: proc(
     }
 
     if len(os.args) > 1 {
-        lua.getglobal(state, "command")
+        lua.getglobal(state, "commands")
         command_index := lua.gettop(state)
         lua.getfield(state, command_index, strings.clone_to_cstring(os.args[1]))
         lua.remove(state, command_index)
