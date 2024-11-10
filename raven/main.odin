@@ -296,28 +296,37 @@ lua_raven_run :: proc "c" (
     print_msg(
         .RAVEN,
         "Running %s%s%s",
-        (ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR),
+        (ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR),
         printable_process_name,
         (ansi.CSI + ansi.RESET + ansi.SGR),
     )
 
     delete(printable_process_name)
 
-    // TODO(volatus): treat the error in the last return value (currently ignored)
-    process_success, process_exit_code, process_output, process_error_output, _ := spawn_and_run_process(command_parts[:])
+    process_exit_code, process_output, process_error_output, process_ok := spawn_and_run_process(command_parts[:])
 
+    if !process_ok {
+        print_msg(.RAVEN, "Failed to run")
+        lua.pushboolean(state, false)
+        return 1
+    }
+
+    if process_exit_code == 0 {
+        print_msg(.RAVEN, "%sSuccess%s", ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR, ansi.CSI + ansi.RESET + ansi.SGR)
+    } else {
+        print_msg(.RAVEN, "%sFailure%s", ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR, ansi.CSI + ansi.RESET + ansi.SGR)
+    }
+
+    lua.pushboolean(state, true)
     lua.createtable(state, 0, 4)
-    process_table_index := lua.gettop(state)
-    lua.pushboolean(state, b32(process_success))
-    lua.setfield(state, process_table_index, "success")
     lua.pushinteger(state, lua.Integer(process_exit_code))
-    lua.setfield(state, process_table_index, "exit_code")
+    lua.setfield(state, -2, "exit_code")
     lua.pushstring(state, process_output)
-    lua.setfield(state, process_table_index, "output")
+    lua.setfield(state, -2, "output")
     lua.pushstring(state, process_error_output)
-    lua.setfield(state, process_table_index, "error_output")
+    lua.setfield(state, -2, "error_output")
 
-    return 1
+    return 2
 }
 
 main :: proc(

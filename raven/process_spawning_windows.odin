@@ -158,7 +158,6 @@ redirect_and_capture_pipe :: proc(read_handle, write_handle: windows.HANDLE, rea
 spawn_and_run_process :: proc(
     command_parts: []cstring,
 ) -> (
-    process_success: bool,
     process_exit_code: u32,
     process_output: cstring,
     process_error_output: cstring,
@@ -246,10 +245,9 @@ spawn_and_run_process :: proc(
     close_handle(stdout_read_handle) or_return
     close_handle(stderr_read_handle) or_return
 
-    process_success = process_exit_code == 0
+    success = true
     process_output = strings.to_cstring(&stdout_builder)
     process_error_output = strings.to_cstring(&stderr_builder)
-    success = true
 
     return
 }
