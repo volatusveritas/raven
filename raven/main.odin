@@ -209,10 +209,11 @@ lua_collect_command_part :: proc "c" (
     state: ^lua.State,
     command_parts: ^[dynamic]cstring,
     part_index: i32,
-    part_type: lua.Type,
 ) -> (
 ) {
     context = runtime.default_context()
+
+    part_type := lua.type(state, part_index)
 
     switch part_type {
     case .NONE, .NIL:
@@ -226,34 +227,24 @@ lua_collect_command_part :: proc "c" (
     case .FUNCTION:
         lua.call(state, 0, 1)
         result_index := lua.gettop(state)
-        result_type := lua.type(state, result_index)
-        lua_collect_command_part(state, command_parts, result_index, result_type)
+        lua_collect_command_part(state, command_parts, result_index)
         lua.pop(state, 1)
     case .TABLE:
-        lua_collect_command_parts_from_table(state, command_parts, part_index)
+        lua.len(state, part_index)
+        subparts_length := lua.tointeger(state, -1)
+        lua.pop(state, 1)
+
+        for i in 1..=subparts_length {
+            lua.geti(state, part_index, i)
+            subpart_index := lua.gettop(state)
+
+            lua_collect_command_part(state, command_parts, subpart_index)
+
+            lua.remove(state, subpart_index)
+        }
     case .USERDATA, .THREAD, .LIGHTUSERDATA:
         part_type_name := lua.typename(state, part_type)
         lua.L_error(state, "bad argument #1 (command) for run: invalid command subcomponent of type %s", part_type_name)
-    }
-}
-
-lua_collect_command_parts_from_table :: proc "c" (
-    state: ^lua.State,
-    command_parts: ^[dynamic]cstring,
-    parts_index: i32,
-) -> (
-) {
-    lua.len(state, parts_index)
-    parts_length := lua.tointeger(state, -1)
-    lua.pop(state, 1)
-
-    for i in 0..<parts_length {
-        part_type := lua.Type(lua.geti(state, parts_index, i + 1))
-        part_index := lua.gettop(state)
-
-        lua_collect_command_part(state, command_parts, part_index, part_type)
-
-        lua.remove(state, part_index)
     }
 }
 
@@ -282,16 +273,37 @@ lua_raven_run :: proc "c" (
     command_parts := make([dynamic]cstring)
     defer delete(command_parts)
 
-    lua_collect_command_parts_from_table(state, &command_parts, 1)
+    lua_collect_command_part(state, &command_parts, 1)
 
     if len(command_parts) == 0 {
         lua.L_error(state, "bad argument #1 (command) for run: command is empty")
         return 0
     }
 
-    print_msg(.RAVEN, "Running process %v", command_parts)
+    printable_process_name: string
 
-    // spawn_and_run_process(command_parts[:])
+    {
+        strings_for_joining := make([]string, len(command_parts))
+        defer delete(strings_for_joining)
+
+        for cstr, i in command_parts {
+            strings_for_joining[i] = string(cstr)
+        }
+
+        printable_process_name = strings.join(strings_for_joining, " ")
+    }
+
+    print_msg(
+        .RAVEN,
+        "Running process %s%s%s",
+        (ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR),
+        printable_process_name,
+        (ansi.CSI + ansi.RESET + ansi.SGR),
+    )
+
+    delete(printable_process_name)
+
+    spawn_and_run_process(command_parts[:])
 
     return 0
 }
