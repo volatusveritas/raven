@@ -295,7 +295,7 @@ lua_raven_run :: proc "c" (
 
     print_msg(
         .RAVEN,
-        "Running process %s%s%s",
+        "Running %s%s%s",
         (ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR),
         printable_process_name,
         (ansi.CSI + ansi.RESET + ansi.SGR),
@@ -303,9 +303,21 @@ lua_raven_run :: proc "c" (
 
     delete(printable_process_name)
 
-    spawn_and_run_process(command_parts[:])
+    // TODO(volatus): treat the error in the last return value (currently ignored)
+    process_success, process_exit_code, process_output, process_error_output, _ := spawn_and_run_process(command_parts[:])
 
-    return 0
+    lua.createtable(state, 0, 4)
+    process_table_index := lua.gettop(state)
+    lua.pushboolean(state, b32(process_success))
+    lua.setfield(state, process_table_index, "success")
+    lua.pushinteger(state, lua.Integer(process_exit_code))
+    lua.setfield(state, process_table_index, "exit_code")
+    lua.pushstring(state, process_output)
+    lua.setfield(state, process_table_index, "output")
+    lua.pushstring(state, process_error_output)
+    lua.setfield(state, process_table_index, "error_output")
+
+    return 1
 }
 
 main :: proc(
