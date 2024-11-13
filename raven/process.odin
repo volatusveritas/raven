@@ -61,6 +61,8 @@ run :: proc(
         return
     }
 
+    defer if !ok do strings.builder_destroy(&stdout_builder)
+
     stderr_builder, stderr_builder_err := strings.builder_make()
 
     if stderr_builder_err != .None {
@@ -68,6 +70,8 @@ run :: proc(
         ok = false
         return
     }
+
+    defer if !ok do strings.builder_destroy(&stderr_builder)
 
     stdout_done := false
     stderr_done := false
@@ -151,8 +155,6 @@ run :: proc(
 
     if state_err != nil {
         print_error(.RAVEN, "could not query process state")
-        strings.builder_destroy(&stdout_builder)
-        strings.builder_destroy(&stderr_builder)
         ok = false
         return
     }
