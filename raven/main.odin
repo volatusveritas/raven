@@ -142,9 +142,9 @@ lua_raven_demand_argument_amount :: proc "c" (
     return 0
 }
 
-lua_collect_command_part :: proc "c" (
+lua_extract_command_parts :: proc "c" (
     state: ^lua.State,
-    command_parts: ^[dynamic]cstring,
+    command_parts: ^[dynamic]string,
     part_index: i32,
 ) -> (
 ) {
@@ -156,7 +156,8 @@ lua_collect_command_part :: proc "c" (
     case .NONE, .NIL:
         // Do nothing
     case .NUMBER, .STRING:
-        part_as_string := lua.tostring(state, part_index)
+        part_as_cstring := lua.tostring(state, part_index)
+        part_as_string := string(part_as_cstring)
         append(command_parts, part_as_string)
     case .BOOLEAN:
         part_as_bool := lua.toboolean(state, part_index)
@@ -164,7 +165,7 @@ lua_collect_command_part :: proc "c" (
     case .FUNCTION:
         lua.call(state, 0, 1)
         result_index := lua.gettop(state)
-        lua_collect_command_part(state, command_parts, result_index)
+        lua_extract_command_parts(state, command_parts, result_index)
         lua.pop(state, 1)
     case .TABLE:
         lua.len(state, part_index)
@@ -175,7 +176,7 @@ lua_collect_command_part :: proc "c" (
             lua.geti(state, part_index, i)
             subpart_index := lua.gettop(state)
 
-            lua_collect_command_part(state, command_parts, subpart_index)
+            lua_extract_command_parts(state, command_parts, subpart_index)
 
             lua.remove(state, subpart_index)
         }
@@ -207,10 +208,10 @@ lua_raven_run :: proc "c" (
         return 0
     }
 
-    command_parts := make([dynamic]cstring)
+    command_parts := make([dynamic]string)
     defer delete(command_parts)
 
-    lua_collect_command_part(state, &command_parts, 1)
+    lua_extract_command_parts(state, &command_parts, 1)
 
     if len(command_parts) == 0 {
         lua.L_error(state, "bad argument #1 (command) for run: command is empty")
@@ -224,10 +225,9 @@ lua_raven_run :: proc "c" (
         print_msg(.RAVEN, "Running %s%s%s", COLOR_IDENTIFIER, printable_process_name, COLOR_RESET)
     }
 
-    process_exit_code, process_output, process_error_output, process_ok := spawn_and_run_process(command_parts[:])
+    process_exit_code, process_output, process_error_output, process_ok := run(command_parts[:])
 
     if !process_ok {
-        print_msg(.RAVEN, "Failed to run")
         lua.pushboolean(state, false)
         return 1
     }
@@ -242,10 +242,13 @@ lua_raven_run :: proc "c" (
     lua.createtable(state, 0, 4)
     lua.pushinteger(state, lua.Integer(process_exit_code))
     lua.setfield(state, -2, "exit_code")
-    lua.pushstring(state, process_output)
+    lua.pushlstring(state, cstring(raw_data(process_output)), len(process_output))
     lua.setfield(state, -2, "output")
-    lua.pushstring(state, process_error_output)
+    lua.pushlstring(state, cstring(raw_data(process_error_output)), len(process_error_output))
     lua.setfield(state, -2, "error_output")
+
+    delete(process_output)
+    delete(process_error_output)
 
     return 2
 }
