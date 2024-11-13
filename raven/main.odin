@@ -13,69 +13,6 @@ import lua "vendor:lua/5.4"
 
 MEASURE_PERFORMANCE :: #config(MEASURE_PERFORMANCE, false)
 
-ContextType :: enum {
-    RAVEN,
-    LUA,
-}
-
-message_context_get_name :: proc(
-    context_type: ContextType,
-) -> (
-    context_name: string
-) {
-    switch context_type {
-    case .RAVEN:
-        return "Raven"
-    case .LUA:
-        return "Lua"
-    case:
-        return "Unknown"
-    }
-}
-
-print_msg :: proc(
-    message_context: ContextType,
-    message: string,
-    args: ..any,
-) -> (
-) {
-    context_name := message_context_get_name(message_context)
-
-    formatted_message := fmt.aprintf(message, ..args)
-    defer delete(formatted_message)
-
-    fmt.printfln(
-        "%s(%s) %s%s",
-        (ansi.CSI + ansi.FG_BRIGHT_YELLOW + ansi.SGR),
-        context_name,
-        (ansi.CSI + ansi.RESET + ansi.SGR),
-        formatted_message,
-    )
-}
-
-print_error :: proc(
-    error_context: ContextType,
-    message: string,
-    args: ..any,
-) -> (
-) {
-    error_context_name := message_context_get_name(error_context)
-
-    formatted_error_message := fmt.aprintf(message, ..args)
-    defer delete(formatted_error_message)
-
-    fmt.eprintfln(
-        "%s(%s) %sError %s:: %s%s%s",
-        (ansi.CSI + ansi.FG_BRIGHT_YELLOW + ansi.SGR),
-        error_context_name,
-        (ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR),
-        (ansi.CSI + ansi.RESET + ansi.SGR),
-        (ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR),
-        formatted_error_message,
-        (ansi.CSI + ansi.RESET + ansi.SGR),
-    )
-}
-
 lua_print_stack :: proc "c" (
     state: ^lua.State,
 ) -> (
@@ -118,13 +55,13 @@ lua_allocation_function :: proc "c" (
     case .None:
         // Do nothing
     case .Out_Of_Memory:
-        print_error(.LUA, "allocation error (out of memory)")
+        print_error(.LUA, "could not allocate (out of memory)")
     case .Invalid_Pointer:
-        print_error(.LUA, "allocation error (invalid pointer)")
+        print_error(.LUA, "could not allocate (invalid pointer)")
     case .Invalid_Argument:
-        print_error(.LUA, "allocation error (invalid argument)")
+        print_error(.LUA, "could not allocate (invalid argument)")
     case .Mode_Not_Implemented:
-        print_error(.LUA, "allocation error (mode not implemented)")
+        print_error(.LUA, "could not allocate (mode not implemented)")
     }
 
     return new_pointer
@@ -280,28 +217,12 @@ lua_raven_run :: proc "c" (
         return 0
     }
 
-    printable_process_name: string
-
     {
-        strings_for_joining := make([]string, len(command_parts))
-        defer delete(strings_for_joining)
+        printable_process_name := strings.join(command_parts[:], " ")
+        defer delete(printable_process_name)
 
-        for cstr, i in command_parts {
-            strings_for_joining[i] = string(cstr)
-        }
-
-        printable_process_name = strings.join(strings_for_joining, " ")
+        print_msg(.RAVEN, "Running %s%s%s", COLOR_IDENTIFIER, printable_process_name, COLOR_RESET)
     }
-
-    print_msg(
-        .RAVEN,
-        "Running %s%s%s",
-        (ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR),
-        printable_process_name,
-        (ansi.CSI + ansi.RESET + ansi.SGR),
-    )
-
-    delete(printable_process_name)
 
     process_exit_code, process_output, process_error_output, process_ok := spawn_and_run_process(command_parts[:])
 
@@ -312,9 +233,9 @@ lua_raven_run :: proc "c" (
     }
 
     if process_exit_code == 0 {
-        print_msg(.RAVEN, "%sSuccess%s", ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR, ansi.CSI + ansi.RESET + ansi.SGR)
+        print_msg(.RAVEN, "%sSuccess%s", COLOR_SUCCESS, COLOR_RESET)
     } else {
-        print_msg(.RAVEN, "%sFailure%s", ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR, ansi.CSI + ansi.RESET + ansi.SGR)
+        print_msg(.RAVEN, "%sFailure (code Hex %X, Dec %d)%s", COLOR_ERROR, process_exit_code, process_exit_code, COLOR_RESET)
     }
 
     lua.pushboolean(state, true)
@@ -338,7 +259,7 @@ main :: proc(
     }
 
     if !os.exists("ravenfile.lua") {
-        print_error(.RAVEN, "ravenfile.lua not found")
+        print_error(.RAVEN, "could not find ravenfile")
         return
     }
 
@@ -406,26 +327,23 @@ main :: proc(
         base_time = time.now()
     }
 
-    switch lua.L_loadfile(state, "ravenfile.lua") {
+    #partial switch lua.L_loadfile(state, "ravenfile.lua") {
     case .OK:
         // Do nothing
     case .ERRRUN:
-        print_error(.LUA, "error while loading ravenfile.lua: runtime error")
+        print_error(.LUA, "could not load ravenfile (runtime error)")
         return
     case .ERRMEM:
-        print_error(.LUA, "error while loading ravenfile.lua: memory error")
+        print_error(.LUA, "could not load ravenfile (memory error)")
         return
     case .ERRERR:
-        print_error(.LUA, "error while loading ravenfile.lua: message handler error")
+        print_error(.LUA, "could not load ravenfile (message handler error)")
         return
     case .ERRSYNTAX:
-        print_error(.LUA, "error while loading ravenfile.lua: syntax error")
-        return
-    case .YIELD:
-        print_error(.LUA, "error while loading ravenfile.lua: execution context yielded")
+        print_error(.LUA, "could not load ravenfile (syntax error)")
         return
     case .ERRFILE:
-        print_error(.LUA, "error while loading ravenfile.lua: could not open or find file")
+        print_error(.LUA, "could not load ravenfile (could not open or find file)")
         return
     }
 
@@ -446,7 +364,7 @@ main :: proc(
         command_field_index := lua.gettop(state)
 
         if lua.type(state, command_field_index) != .FUNCTION {
-            print_error(.RAVEN, "command not found (%s)", os.args[1])
+            print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, os.args[1], COLOR_RESET)
             return
         }
 
