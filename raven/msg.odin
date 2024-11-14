@@ -64,14 +64,12 @@ print_error :: proc(
     defer delete(formatted_error_message)
 
     fmt.eprintfln(
-        "%s(%s) %sError %s:: %s%s%s",
+        "%s(%s) %sError %s:: %s",
         COLOR_CONTEXT,
         message_context_name,
         COLOR_ERROR,
         COLOR_RESET,
-        COLOR_ERROR,
         formatted_error_message,
-        COLOR_RESET,
     )
 }
 
