@@ -11,6 +11,8 @@ import "core:c/libc"
 
 import lua "vendor:lua/5.4"
 
+help :: #load("../help.txt", string)
+
 MEASURE_PERFORMANCE :: #config(MEASURE_PERFORMANCE, false)
 
 lua_print_stack :: proc "c" (
@@ -261,16 +263,58 @@ main :: proc(
         base_time := time.now()
     }
 
-    if !os.exists("ravenfile.lua") {
-        print_error(.RAVEN, "could not find ravenfile")
-        return
-    }
-
     when MEASURE_PERFORMANCE {
         file_verification_duration := time.duration_milliseconds(time.since(base_time))
         fmt.printfln("Verifying if ravenfile.lua exists took %fms.", file_verification_duration)
         total_duration_milliseconds += file_verification_duration
         base_time = time.now()
+    }
+
+    command_args: []string
+    list_commands := false
+    ravenfile_path := "ravenfile.lua"
+    display_help := false
+
+    if len(os.args) > 1 {
+        command_section_start := 1
+
+        for arg, i in os.args[1:] {
+            if !strings.starts_with(arg, "-") {
+                break
+            }
+
+            if arg == "-list" {
+                list_commands = true
+            } else if arg == "-help" {
+                display_help = true
+            } else if strings.starts_with(arg, "-use=") {
+                if len(arg) < (len("-use=") + 1) {
+                    print_error(.RAVEN, "missing value for option %suse%s", COLOR_IDENTIFIER, COLOR_RESET)
+                    return
+                }
+
+                ravenfile_path = arg[len("-use="):]
+            } else {
+                print_error(.RAVEN, "could not handle option %s%s%s (unknown option)", COLOR_IDENTIFIER, arg, COLOR_RESET)
+                return
+            }
+
+            command_section_start += 1
+        }
+
+        if command_section_start < len(os.args) {
+            command_args = os.args[command_section_start:]
+        }
+    }
+
+    if display_help {
+        fmt.print(help)
+        return
+    }
+
+    if !os.exists(ravenfile_path) {
+        print_error(.RAVEN, "could not find ravenfile at %s%s%s", COLOR_PATH, ravenfile_path, COLOR_RESET)
+        return
     }
 
     state := lua.newstate(lua_allocation_function, nil)
@@ -298,27 +342,27 @@ main :: proc(
         base_time = time.now()
     }
 
-    lua.newtable(state)
-    raven_table_index := lua.gettop(state)
+    if !list_commands {
+        lua.newtable(state)
+        raven_table_index := lua.gettop(state)
 
-    lua.pushcfunction(state, lua_raven_run)
-    lua.setfield(state, raven_table_index, "run")
+        lua.pushcfunction(state, lua_raven_run)
+        lua.setfield(state, raven_table_index, "run")
 
-    lua.pushcfunction(state, lua_raven_demand_argument_amount)
-    lua.setfield(state, raven_table_index, "demand_argument_amount")
+        lua.pushcfunction(state, lua_raven_demand_argument_amount)
+        lua.setfield(state, raven_table_index, "demand_argument_amount")
 
-    lua.createtable(state, i32(len(os.args) - 2), 0)
+        lua.createtable(state, i32(len(os.args) - 2), 0)
 
-    if len(os.args) > 2 {
-        for arg, i in os.args[2:] {
-            lua.pushstring(state, strings.clone_to_cstring(arg))
+        for arg, i in command_args {
+            lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
             lua.seti(state, -2, lua.Integer(i + 1))
         }
+
+        lua.setfield(state, raven_table_index, "args")
+
+        lua.setglobal(state, "raven")
     }
-
-    lua.setfield(state, raven_table_index, "args")
-
-    lua.setglobal(state, "raven")
 
     lua.newtable(state)
     lua.setglobal(state, "commands")
@@ -330,24 +374,29 @@ main :: proc(
         base_time = time.now()
     }
 
-    #partial switch lua.L_loadfile(state, "ravenfile.lua") {
-    case .OK:
-        // Do nothing
-    case .ERRRUN:
-        print_error(.LUA, "could not load ravenfile (runtime error)")
-        return
-    case .ERRMEM:
-        print_error(.LUA, "could not load ravenfile (memory error)")
-        return
-    case .ERRERR:
-        print_error(.LUA, "could not load ravenfile (message handler error)")
-        return
-    case .ERRSYNTAX:
-        print_error(.LUA, "could not load ravenfile (syntax error)")
-        return
-    case .ERRFILE:
-        print_error(.LUA, "could not load ravenfile (could not open or find file)")
-        return
+    {
+        ravenfile_path_cstr := strings.clone_to_cstring(ravenfile_path)
+        defer delete(ravenfile_path_cstr)
+
+        #partial switch lua.L_loadfile(state, ravenfile_path_cstr) {
+        case .OK:
+            // Do nothing
+        case .ERRRUN:
+            print_error(.LUA, "could not load ravenfile (runtime error)")
+            return
+        case .ERRMEM:
+            print_error(.LUA, "could not load ravenfile (memory error)")
+            return
+        case .ERRERR:
+            print_error(.LUA, "could not load ravenfile (message handler error)")
+            return
+        case .ERRSYNTAX:
+            print_error(.LUA, "could not load ravenfile (syntax error)")
+            return
+        case .ERRFILE:
+            print_error(.LUA, "could not load ravenfile (could not open or find file)")
+            return
+        }
     }
 
     lua.call(state, 0, 0)
@@ -359,15 +408,30 @@ main :: proc(
         base_time = time.now()
     }
 
-    if len(os.args) > 1 {
+    if list_commands {
+        lua.getglobal(state, "commands")
+        commands_index := lua.gettop(state)
+
+        print_msg(.RAVEN, "Commands in ravenfile:")
+
+        lua.pushnil(state)
+        for lua.next(state, commands_index) != 0 {
+            lua.pushvalue(state, -2)
+            command_name := lua.tostring(state, -1)
+            lua.pop(state, 2)
+            fmt.printfln("- %s%s%s", COLOR_IDENTIFIER, command_name, COLOR_RESET)
+        }
+    } else if command_args != nil {
         lua.getglobal(state, "commands")
         command_index := lua.gettop(state)
-        lua.getfield(state, command_index, strings.clone_to_cstring(os.args[1]))
+        command_name_cstr := strings.clone_to_cstring(command_args[0])
+        lua.getfield(state, command_index, command_name_cstr)
+        delete(command_name_cstr)
         lua.remove(state, command_index)
         command_field_index := lua.gettop(state)
 
         if lua.type(state, command_field_index) != .FUNCTION {
-            print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, os.args[1], COLOR_RESET)
+            print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, command_args[0], COLOR_RESET)
             return
         }
 

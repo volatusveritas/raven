@@ -17,6 +17,7 @@ COLOR_ERROR :: ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR
 COLOR_SUCCESS :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
 COLOR_IDENTIFIER :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
 COLOR_CONTEXT :: ansi.CSI + ansi.FG_BRIGHT_YELLOW + ansi.SGR
+COLOR_PATH :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
 
 MessageContext :: enum {
     RAVEN,

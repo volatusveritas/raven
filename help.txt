@@ -1,0 +1,9 @@
+usage: raven {options} [command] {arguments}
+
+options:
+	-help
+		Show this help message.
+	-use=<path>
+		Use <path> as ravenfile instead of ./ravenfile.lua.
+	-list
+		List all registered commands.
