@@ -144,48 +144,83 @@ lua_raven_demand_argument_amount :: proc "c" (
     return 0
 }
 
-lua_extract_command_parts :: proc "c" (
+extract_value_parts :: proc(
     state: ^lua.State,
-    command_parts: ^[dynamic]string,
-    part_index: i32,
+    value_index: i32,
+    value_parts: ^[dynamic]string,
 ) -> (
 ) {
-    context = runtime.default_context()
+    value_type := lua.type(state, value_index)
 
-    part_type := lua.type(state, part_index)
-
-    switch part_type {
+    switch value_type {
     case .NONE, .NIL:
         // Do nothing
     case .NUMBER, .STRING:
-        part_as_cstring := lua.tostring(state, part_index)
-        part_as_string := string(part_as_cstring)
-        append(command_parts, part_as_string)
+        value_as_cstring := lua.tostring(state, value_index)
+        value_as_string := string(value_as_cstring)
+        append(value_parts, value_as_string)
     case .BOOLEAN:
-        part_as_bool := lua.toboolean(state, part_index)
-        append(command_parts, part_as_bool ? "true" : "false")
+        value_as_bool := lua.toboolean(state, value_index)
+        append(value_parts, value_as_bool ? "true" : "false")
     case .FUNCTION:
         lua.call(state, 0, 1)
         result_index := lua.gettop(state)
-        lua_extract_command_parts(state, command_parts, result_index)
+        extract_value_parts(state, result_index, value_parts)
         lua.pop(state, 1)
     case .TABLE:
-        lua.len(state, part_index)
+        lua.len(state, value_index)
         subparts_length := lua.tointeger(state, -1)
         lua.pop(state, 1)
 
         for i in 1..=subparts_length {
-            lua.geti(state, part_index, i)
-            subpart_index := lua.gettop(state)
+            lua.geti(state, value_index, i)
+            subvalue_index := lua.gettop(state)
 
-            lua_extract_command_parts(state, command_parts, subpart_index)
+            extract_value_parts(state, subvalue_index, value_parts)
 
-            lua.remove(state, subpart_index)
+            lua.remove(state, subvalue_index)
         }
     case .USERDATA, .THREAD, .LIGHTUSERDATA:
-        part_type_name := lua.typename(state, part_type)
-        lua.L_error(state, "bad argument #1 (command) for run: invalid command subcomponent of type %s", part_type_name)
+        value_type_name := lua.typename(state, value_type)
+        lua.L_error(state, "bad argument #1 (command) for run: invalid command subcomponent of type %s", value_type_name)
     }
+}
+
+expand_value :: proc(
+    state: ^lua.State,
+    value_index: i32,
+) -> (
+    value_parts: [dynamic]string,
+    ok: bool,
+) {
+    value_type := lua.type(state, value_index)
+    #partial switch value_type {
+    case .STRING:
+        value_length: uint
+        value_as_cstring := lua.tolstring(state, value_index, &value_length)
+        value_as_bytes := (transmute([^]byte)value_as_cstring)[:value_length]
+        value_as_string := transmute(string)value_as_bytes
+        parts, alloc_err := strings.split(value_as_string, " ")
+        defer delete(parts)
+
+        if alloc_err != .None {
+            print_error(.RAVEN, "could not allocate space for parts while expanding value")
+            return nil, false
+        }
+
+        value_parts = make([dynamic]string, 0, len(parts))
+
+        for part in parts {
+            append(&value_parts, part)
+        }
+    case .TABLE:
+        extract_value_parts(state, value_index, &value_parts)
+    case:
+        print_error(.RAVEN, "invalid type provided to expand_value (expected string or table, got %s)", lua.typename(state, value_type))
+        return nil, false
+    }
+
+    return value_parts, true
 }
 
 lua_raven_run :: proc "c" (
@@ -204,16 +239,19 @@ lua_raven_run :: proc "c" (
 
     argument_1_type := lua.type(state, 1)
 
-    if argument_1_type != .TABLE {
+    if argument_1_type != .TABLE && argument_1_type != .STRING {
         argument_1_type_name := lua.typename(state, argument_1_type)
         lua.L_error(state, "bad argument #1 (command) for run: expected table, got %s", argument_1_type_name)
         return 0
     }
 
-    command_parts := make([dynamic]string)
-    defer delete(command_parts)
+    command_parts, expand_ok := expand_value(state, 1)
 
-    lua_extract_command_parts(state, &command_parts, 1)
+    if !expand_ok {
+        return 0
+    }
+
+    defer delete(command_parts)
 
     if len(command_parts) == 0 {
         lua.L_error(state, "bad argument #1 (command) for run: command is empty")
@@ -221,8 +259,21 @@ lua_raven_run :: proc "c" (
     }
 
     {
-        printable_process_name := strings.join(command_parts[:], " ")
-        defer delete(printable_process_name)
+        printable_process_name: string
+
+        if argument_1_type == .TABLE {
+            printable_process_name = strings.join(command_parts[:], " ")
+        } else {
+            command_length: uint
+            command_as_cstring := lua.tolstring(state, 1, &command_length)
+            command_as_bytes := (transmute([^]byte)command_as_cstring)[:command_length]
+            command_as_string := transmute(string)command_as_bytes
+            printable_process_name = command_as_string
+        }
+
+        defer if argument_1_type == .TABLE {
+            delete(printable_process_name)
+        }
 
         print_msg(.RAVEN, "Running %s%s%s", COLOR_IDENTIFIER, printable_process_name, COLOR_RESET)
     }
