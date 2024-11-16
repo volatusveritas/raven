@@ -342,10 +342,13 @@ main :: proc(
         base_time = time.now()
     }
 
-    if !list_commands {
-        lua.newtable(state)
-        raven_table_index := lua.gettop(state)
+    lua.newtable(state)
+    raven_table_index := lua.gettop(state)
 
+    lua.newtable(state)
+    lua.setfield(state, raven_table_index, "commands")
+
+    if !list_commands {
         lua.pushcfunction(state, lua_raven_run)
         lua.setfield(state, raven_table_index, "run")
 
@@ -354,22 +357,21 @@ main :: proc(
 
         lua.createtable(state, i32(len(os.args) - 2), 0)
 
-        for arg, i in command_args {
-            lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
-            lua.seti(state, -2, lua.Integer(i + 1))
+        if len(command_args) > 1 {
+            for arg, i in command_args[1:] {
+                lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
+                lua.seti(state, -2, lua.Integer(i + 1))
+            }
         }
 
         lua.setfield(state, raven_table_index, "args")
-
-        lua.setglobal(state, "raven")
     }
 
-    lua.newtable(state)
-    lua.setglobal(state, "commands")
+    lua.setglobal(state, "raven")
 
     when MEASURE_PERFORMANCE {
         raven_setup_duration := time.duration_milliseconds(time.since(base_time))
-        fmt.printfln("Setting up Raven environment (raven, raven.args, commands) took %fms.", raven_setup_duration)
+        fmt.printfln("Setting up raven table took %fms.", raven_setup_duration)
         total_duration_milliseconds += raven_setup_duration
         base_time = time.now()
     }
@@ -409,7 +411,8 @@ main :: proc(
     }
 
     if list_commands {
-        lua.getglobal(state, "commands")
+        lua.getglobal(state, "raven")
+        lua.getfield(state, -1, "commands")
         commands_index := lua.gettop(state)
 
         print_msg(.RAVEN, "Commands in ravenfile:")
@@ -422,15 +425,22 @@ main :: proc(
             fmt.printfln("- %s%s%s", COLOR_IDENTIFIER, command_name, COLOR_RESET)
         }
     } else if command_args != nil {
-        lua.getglobal(state, "commands")
-        command_index := lua.gettop(state)
-        command_name_cstr := strings.clone_to_cstring(command_args[0])
-        lua.getfield(state, command_index, command_name_cstr)
-        delete(command_name_cstr)
-        lua.remove(state, command_index)
-        command_field_index := lua.gettop(state)
+        {
+            lua.getglobal(state, "raven")
+            raven_index := lua.gettop(state)
+            defer lua.remove(state, raven_index)
 
-        if lua.type(state, command_field_index) != .FUNCTION {
+            lua.getfield(state, -1, "commands")
+            raven_commands_index := lua.gettop(state)
+            defer lua.remove(state, raven_commands_index)
+
+            command_name_cstr := strings.clone_to_cstring(command_args[0])
+            defer delete(command_name_cstr)
+
+            lua.getfield(state, raven_commands_index, command_name_cstr)
+        }
+
+        if lua.type(state, -1) != .FUNCTION {
             print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, command_args[0], COLOR_RESET)
             return
         }
