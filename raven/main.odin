@@ -1,13 +1,14 @@
 package raven
 
 import "base:runtime"
+import "core:c/libc"
 import "core:encoding/ansi"
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:os/os2"
 import "core:strings"
 import "core:time"
-import "core:c/libc"
 
 import lua "vendor:lua/5.4"
 
@@ -313,6 +314,113 @@ lua_raven_run :: proc "c" (
     return 2
 }
 
+lua_raven_older :: proc "c" (
+    state: ^lua.State,
+) -> (
+    result_count: i32,
+) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != nil {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_amount := lua.gettop(state)
+
+    if argument_amount < 1 {
+        error_message = "missing argument #1 for older: files (string expandable)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .TABLE && argument1_type != .STRING {
+        error_message = "bad argument #1 (files) to older: expected \"string expandable\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    if argument_amount < 2 {
+        error_message = "missing argument #2 for older: others (string expandable)"
+        return
+    }
+
+    argument2_type := lua.type(state, 2)
+
+    if argument2_type != .TABLE && argument2_type != .STRING {
+        error_message = "bad argument #2 (others) to older: expected \"string expandable\", got \"%s\""
+        error_arg = lua.typename(state, argument2_type)
+        return
+    }
+
+    files_parts, files_ok := expand_value(state, 1)
+
+    if !files_ok {
+        return 0
+    }
+
+    defer delete(files_parts)
+
+    others_parts, others_ok := expand_value(state, 2)
+
+    if !others_ok {
+        return 0
+    }
+
+    defer delete(others_parts)
+
+    files_modification_times := make([dynamic]time.Time, len(files_parts))
+    defer delete(files_modification_times)
+
+    for file_name, i in files_parts {
+        file_info, alloc_err := os2.stat(file_name, context.allocator)
+
+        if alloc_err == .Not_Exist {
+            files_modification_times[i] = time.Time { _nsec = 0.0 }
+        } else if alloc_err != nil {
+            error_message = "could not allocate memory for file information (%s)"
+            error_arg = file_name
+            return
+        }
+
+        files_modification_times[i] = file_info.modification_time
+    }
+
+    others_modification_times := make([dynamic]time.Time, len(others_parts))
+    defer delete(others_modification_times)
+
+    for file_name, i in others_parts {
+        file_info, alloc_err := os2.stat(file_name, context.allocator)
+
+        if alloc_err == .Not_Exist {
+            others_modification_times[i] = time.Time { _nsec = 0.0 }
+        } else if alloc_err != nil {
+            error_message = "could not allocate memory for file information (%s)"
+            error_arg = file_name
+            return
+        }
+
+        others_modification_times[i] = file_info.modification_time
+    }
+
+    for file_modification_time in files_modification_times {
+        for other_modification_time in others_modification_times {
+            if time.diff(file_modification_time, other_modification_time) >= 0.0 {
+                lua.pushboolean(state, true)
+                lua.pushboolean(state, true)
+                return 2
+            }
+        }
+    }
+
+    lua.pushboolean(state, false)
+    lua.pushboolean(state, true)
+    return 2
+}
+
 main :: proc(
 ) -> (
 ) {
@@ -409,6 +517,8 @@ main :: proc(
     lua.pushcfunction(state, lua_raven_run)
     lua.setfield(state, raven_table_index, "run")
 
+    lua.pushcfunction(state, lua_raven_older)
+    lua.setfield(state, raven_table_index, "older")
 
     lua.pushcfunction(state, lua_raven_demand_argument_amount)
     lua.setfield(state, raven_table_index, "demand_argument_amount")
