@@ -230,19 +230,26 @@ lua_raven_run :: proc "c" (
 ) {
     context = runtime.default_context()
 
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != nil {
+        lua.L_error(state, error_message, error_arg)
+    }
+
     argument_amount := lua.gettop(state)
 
     if argument_amount < 1 {
-        lua.L_error(state, "missing argument #1 for run: command (table)")
-        return 0
+        error_message = "missing argument #1 for run: command (table)"
+        return
     }
 
-    argument_1_type := lua.type(state, 1)
+    argument1_type := lua.type(state, 1)
 
-    if argument_1_type != .TABLE && argument_1_type != .STRING {
-        argument_1_type_name := lua.typename(state, argument_1_type)
-        lua.L_error(state, "bad argument #1 (command) for run: expected table, got %s", argument_1_type_name)
-        return 0
+    if argument1_type != .TABLE && argument1_type != .STRING {
+        error_message = "bad argument #1 (command) for run: expected \"string expandable\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
     }
 
     command_parts, expand_ok := expand_value(state, 1)
@@ -254,14 +261,14 @@ lua_raven_run :: proc "c" (
     defer delete(command_parts)
 
     if len(command_parts) == 0 {
-        lua.L_error(state, "bad argument #1 (command) for run: command is empty")
-        return 0
+        error_message = "bad argument #1 (command) for run: command is empty"
+        return
     }
 
     {
         printable_process_name: string
 
-        if argument_1_type == .TABLE {
+        if argument1_type == .TABLE {
             printable_process_name = strings.join(command_parts[:], " ")
         } else {
             command_length: uint
@@ -271,7 +278,7 @@ lua_raven_run :: proc "c" (
             printable_process_name = command_as_string
         }
 
-        defer if argument_1_type == .TABLE {
+        defer if argument1_type == .TABLE {
             delete(printable_process_name)
         }
 
@@ -399,24 +406,23 @@ main :: proc(
     lua.newtable(state)
     lua.setfield(state, raven_table_index, "commands")
 
-    if !list_commands {
-        lua.pushcfunction(state, lua_raven_run)
-        lua.setfield(state, raven_table_index, "run")
+    lua.pushcfunction(state, lua_raven_run)
+    lua.setfield(state, raven_table_index, "run")
 
-        lua.pushcfunction(state, lua_raven_demand_argument_amount)
-        lua.setfield(state, raven_table_index, "demand_argument_amount")
 
-        lua.createtable(state, i32(len(os.args) - 2), 0)
+    lua.pushcfunction(state, lua_raven_demand_argument_amount)
+    lua.setfield(state, raven_table_index, "demand_argument_amount")
 
-        if len(command_args) > 1 {
-            for arg, i in command_args[1:] {
-                lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
-                lua.seti(state, -2, lua.Integer(i + 1))
-            }
+    lua.createtable(state, i32(len(os.args) - 2), 0)
+
+    if len(command_args) > 1 {
+        for arg, i in command_args[1:] {
+            lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
+            lua.seti(state, -2, lua.Integer(i + 1))
         }
-
-        lua.setfield(state, raven_table_index, "args")
     }
+
+    lua.setfield(state, raven_table_index, "args")
 
     lua.setglobal(state, "raven")
 
