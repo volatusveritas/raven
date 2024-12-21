@@ -24,11 +24,7 @@ MessageContext :: enum {
     LUA,
 }
 
-message_context_get_name :: proc(
-    message_context: MessageContext,
-) -> (
-    context_name: string
-) {
+message_context_get_name :: proc(message_context: MessageContext) -> (context_name: string) {
     switch message_context {
     case .RAVEN:
         return "Raven"
@@ -39,12 +35,7 @@ message_context_get_name :: proc(
     }
 }
 
-print_msg :: proc(
-    message_context: MessageContext,
-    message: string,
-    args: ..any,
-) -> (
-) {
+print_msg :: proc(message_context: MessageContext, message: string, args: ..any) -> () {
     context_name := message_context_get_name(message_context)
 
     formatted_message := fmt.aprintf(message, ..args)
@@ -53,12 +44,7 @@ print_msg :: proc(
     fmt.printfln("%s(%s) %s%s", COLOR_CONTEXT, context_name, COLOR_RESET, formatted_message)
 }
 
-print_error :: proc(
-    message_context: MessageContext,
-    message: string,
-    args: ..any,
-) -> (
-) {
+print_error :: proc(message_context: MessageContext, message: string, args: ..any) -> () {
     message_context_name := message_context_get_name(message_context)
 
     formatted_error_message := fmt.aprintf(message, ..args)

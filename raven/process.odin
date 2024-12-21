@@ -1,19 +1,11 @@
 package raven
 
-import "core:os"
 import "core:os/os2"
 import "core:strings"
 
 PIPE_BUFFER_SIZE :: 4096
 
-run :: proc(
-    command_parts: []string,
-) -> (
-    process_exit_code: int,
-    stdout: []byte,
-    stderr: []byte,
-    ok: bool,
-) {
+run :: proc(command_parts: []string) -> (process_exit_code: int, stdout: []byte, stderr: []byte, ok: bool) {
     assert(len(command_parts) > 0, "Command parts should have at least one item")
 
     stdout_read_handle, stdout_write_handle, stdout_pipe_err := os2.pipe()
@@ -30,7 +22,6 @@ run :: proc(
         return
     }
     defer os2.close(stderr_read_handle)
-    stdin_read_handle, stdin_write_handle, stdin_pipe_err := os2.pipe()
 
     process_handle: os2.Process
     {
@@ -53,24 +44,10 @@ run :: proc(
         }
     }
 
-    stdout_builder, stdout_builder_err := strings.builder_make()
-
-    if stdout_builder_err != .None {
-        print_error(.RAVEN, "could not allocate string builder for program stdout")
-        ok = false
-        return
-    }
-
+    stdout_builder := strings.builder_make()
     defer if !ok do strings.builder_destroy(&stdout_builder)
 
-    stderr_builder, stderr_builder_err := strings.builder_make()
-
-    if stderr_builder_err != .None {
-        print_error(.RAVEN, "failed to allocate string builder for program stderr")
-        ok = false
-        return
-    }
-
+    stderr_builder := strings.builder_make()
     defer if !ok do strings.builder_destroy(&stderr_builder)
 
     stdout_done := false

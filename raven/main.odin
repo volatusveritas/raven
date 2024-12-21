@@ -1,9 +1,8 @@
 package raven
 
 import "base:runtime"
-import "core:c/libc"
-import "core:encoding/ansi"
 import "core:fmt"
+import "core:io"
 import "core:mem"
 import "core:os"
 import "core:os/os2"
@@ -12,14 +11,129 @@ import "core:time"
 
 import lua "vendor:lua/5.4"
 
-help :: #load("../help.txt", string)
+// TODO(volatus): check for memory leaks using the tracking allocator and fix them
 
 MEASURE_PERFORMANCE :: #config(MEASURE_PERFORMANCE, false)
 
-lua_print_stack :: proc "c" (
-    state: ^lua.State,
-) -> (
-) {
+help :: #load("../help.txt", string)
+
+/* Procedure naming convention
+
+Any CFunction must be preceded by `lua_`.
+
+Any procedure meant to be exported to Lua under the `raven` table must be
+preceded by `lua_raven_` (by virtue of also being a Lua CFunction).
+*/
+
+Raven_Error :: enum lua.Integer {
+    None,
+    Permission_Denied,
+    Exists,
+    Does_Not_Exist,
+    Closed,
+    Timeout,
+    Broken_Pipe,
+    No_Size,
+    Invalid_File,
+    Invalid_Directory,
+    Invalid_Path,
+    Invalid_Callback,
+    Pattern_Has_Separator,
+    Unsupported,
+    File_Is_Pipe,
+    Not_A_Directory,
+    EOF,
+    Unexpected_EOF,
+    Short_Write,
+    Invalid_Write,
+    Short_Buffer,
+    No_Progress,
+    Invalid_Whence,
+    Invalid_Offset,
+    Invalid_Unread,
+    Negative_Read,
+    Negative_Write,
+    Negative_Count,
+    Buffer_Full,
+    Unknown,
+    Empty,
+    Out_Of_Memory,
+    Invalid_Pointer,
+    Invalid_Argument,
+    Mode_Not_Implemented,
+    Platform_Error,
+    Path_Has_Separator,
+}
+
+os_error_to_raven :: proc(err: os.Error) -> (raven_err: Raven_Error) {
+    if err == nil {
+        return .None
+    }
+
+    switch e in err {
+    case os.General_Error:
+        switch e {
+        case .None: return .None
+        case .Permission_Denied: return .Permission_Denied
+        case .Exist: return .Exists
+        case .Not_Exist: return .Does_Not_Exist
+        case .Timeout: return .Timeout
+        case .Broken_Pipe: return .Broken_Pipe
+        case .No_Size: return .No_Size
+        case .Invalid_File: return .Invalid_File
+        case .Invalid_Dir: return .Invalid_Directory
+        case .Invalid_Path: return .Invalid_Path
+        case .Invalid_Callback: return .Invalid_Callback
+        case .Unsupported: return .Unsupported
+        case .File_Is_Pipe: return .File_Is_Pipe
+        case .Not_Dir: return .Not_A_Directory
+        case .Closed: return .Closed
+        case .Pattern_Has_Separator: return .Pattern_Has_Separator
+        }
+    case io.Error:
+        switch e {
+        case .None: return .None
+        case .EOF: return .EOF
+        case .Unexpected_EOF: return .Unexpected_EOF
+        case .Short_Write: return .Short_Write
+        case .Invalid_Write: return .Invalid_Write
+        case .Short_Buffer: return .Short_Buffer
+        case .No_Progress: return .No_Progress
+        case .Invalid_Whence: return .Invalid_Whence
+        case .Invalid_Offset: return .Invalid_Offset
+        case .Invalid_Unread: return .Invalid_Unread
+        case .Negative_Read: return .Negative_Read
+        case .Negative_Write: return .Negative_Write
+        case .Negative_Count: return .Negative_Count
+        case .Buffer_Full: return .Buffer_Full
+        case .Unknown: return .Unknown
+        case .Empty: return .Empty
+        }
+    case runtime.Allocator_Error:
+        switch e {
+        case .None: return .None
+        case .Out_Of_Memory: return .Out_Of_Memory
+        case .Invalid_Pointer: return .Invalid_Pointer
+        case .Invalid_Argument: return .Invalid_Argument
+        case .Mode_Not_Implemented: return .Mode_Not_Implemented
+        }
+    case os.Platform_Error:
+        return .Platform_Error
+    }
+
+    return nil
+}
+
+lua_get_string :: proc "c" (state: ^lua.State, value_index: i32) -> (str: string) {
+    value_length: uint
+    value_as_cstring := lua.tolstring(state, value_index, &value_length)
+    value_as_bytes := (cast([^]byte)value_as_cstring)[:value_length]
+    value_as_string := transmute(string)value_as_bytes
+
+    return value_as_string
+}
+
+lua_print_stack :: proc "c" (state: ^lua.State) {
     stack_length := lua.gettop(state)
 
     context = runtime.default_context()
@@ -41,14 +155,7 @@ lua_print_stack :: proc "c" (
     }
 }
 
-lua_allocation_function :: proc "c" (
-    user_data: rawptr,
-    ptr: rawptr,
-    old_size: uint,
-    new_size: uint,
-) -> (
-    new_pointer: rawptr,
-) {
+lua_allocation_function :: proc "c" (user_data, ptr: rawptr, old_size, new_size: uint) -> (new_pointer: rawptr) {
     context = runtime.default_context()
 
     resize_err: runtime.Allocator_Error
@@ -70,11 +177,7 @@ lua_allocation_function :: proc "c" (
     return new_pointer
 }
 
-lua_atpanic :: proc "c" (
-    state: ^lua.State,
-) -> (
-    result_count: i32,
-) {
+lua_atpanic :: proc "c" (state: ^lua.State) -> (result_count: i32) {
     context = runtime.default_context()
 
     switch lua.type(state, -1) {
@@ -103,11 +206,11 @@ lua_atpanic :: proc "c" (
     return 0
 }
 
-lua_raven_demand_argument_amount :: proc "c" (
-    state: ^lua.State,
-) -> (
-    result_count: i32,
-) {
+// Errors if not enough command line arguments were given to the command.
+//
+// Parameters:
+// - amount (integer): the amount of arguments to expect from args
+lua_raven_demand_argument_amount :: proc "c" (state: ^lua.State) -> (result_count: i32) {
     argument_amount := lua.gettop(state)
 
     if argument_amount < 1 {
@@ -145,12 +248,7 @@ lua_raven_demand_argument_amount :: proc "c" (
     return 0
 }
 
-extract_value_parts :: proc(
-    state: ^lua.State,
-    value_index: i32,
-    value_parts: ^[dynamic]string,
-) -> (
-) {
+extract_value_parts :: proc(state: ^lua.State, value_index: i32, value_parts: ^[dynamic]string) {
     value_type := lua.type(state, value_index)
 
     switch value_type {
@@ -187,20 +285,11 @@ extract_value_parts :: proc(
     }
 }
 
-expand_value :: proc(
-    state: ^lua.State,
-    value_index: i32,
-) -> (
-    value_parts: [dynamic]string,
-    ok: bool,
-) {
+expand_value :: proc(state: ^lua.State, value_index: i32) -> (value_parts: [dynamic]string, ok: bool) {
     value_type := lua.type(state, value_index)
     #partial switch value_type {
     case .STRING:
-        value_length: uint
-        value_as_cstring := lua.tolstring(state, value_index, &value_length)
-        value_as_bytes := (transmute([^]byte)value_as_cstring)[:value_length]
-        value_as_string := transmute(string)value_as_bytes
+        value_as_string := lua_get_string(state, value_index)
         parts, alloc_err := strings.split(value_as_string, " ")
         defer delete(parts)
 
@@ -224,11 +313,18 @@ expand_value :: proc(
     return value_parts, true
 }
 
-lua_raven_run :: proc "c" (
-    state: ^lua.State,
-) -> (
-    result_count: i32,
-) {
+// Runs a command.
+//
+// Parameters:
+// - command (expandable): the command to run, built from the expandable's parts.
+//
+// Returns:
+// - [1] (boolean): true if the command succeeded, false otherwise
+// - [2] (table): if [1] is true, a table containing the following keys:
+//   - exit_code (number): the process' exit code
+//   - output (string): the process' captured stdout output
+//   - error_output (string): the process' captured stderr output
+lua_raven_run :: proc "c" (state: ^lua.State) -> (result_count: i32) {
     context = runtime.default_context()
 
     error_message: cstring
@@ -241,14 +337,14 @@ lua_raven_run :: proc "c" (
     argument_amount := lua.gettop(state)
 
     if argument_amount < 1 {
-        error_message = "missing argument #1 for run: command (table)"
+        error_message = "missing argument #1 for \"run\": command (expandable)"
         return
     }
 
     argument1_type := lua.type(state, 1)
 
     if argument1_type != .TABLE && argument1_type != .STRING {
-        error_message = "bad argument #1 (command) for run: expected \"string expandable\", got \"%s\""
+        error_message = "bad argument #1 for \"run\" (command): expected \"expandable\", got \"%s\""
         error_arg = lua.typename(state, argument1_type)
         return
     }
@@ -256,13 +352,14 @@ lua_raven_run :: proc "c" (
     command_parts, expand_ok := expand_value(state, 1)
 
     if !expand_ok {
-        return 0
+        error_message = "could not expand argument #1 for \"run\" (command)"
+        return
     }
 
     defer delete(command_parts)
 
     if len(command_parts) == 0 {
-        error_message = "bad argument #1 (command) for run: command is empty"
+        error_message = "bad argument #1 for \"run\" (command): command is empty"
         return
     }
 
@@ -272,10 +369,7 @@ lua_raven_run :: proc "c" (
         if argument1_type == .TABLE {
             printable_process_name = strings.join(command_parts[:], " ")
         } else {
-            command_length: uint
-            command_as_cstring := lua.tolstring(state, 1, &command_length)
-            command_as_bytes := (transmute([^]byte)command_as_cstring)[:command_length]
-            command_as_string := transmute(string)command_as_bytes
+            command_as_string := lua_get_string(state, 1)
             printable_process_name = command_as_string
         }
 
@@ -314,11 +408,15 @@ lua_raven_run :: proc "c" (
     return 2
 }
 
-lua_raven_older :: proc "c" (
-    state: ^lua.State,
-) -> (
-    result_count: i32,
-) {
+// Tests whether some files are older than others.
+//
+// Parameters:
+// - files (expandable): the files to be compared.
+// - others (expandable): the files to compare with.
+//
+// Returns:
+// - [1] (boolean): true if any of the items in `files` is older than any of the items in `others`
+lua_raven_older :: proc "c" (state: ^lua.State) -> (result_count: i32) {
     context = runtime.default_context()
 
     error_message: cstring
@@ -331,27 +429,27 @@ lua_raven_older :: proc "c" (
     argument_amount := lua.gettop(state)
 
     if argument_amount < 1 {
-        error_message = "missing argument #1 for older: files (string expandable)"
+        error_message = "missing argument #1 for \"older\": files (expandable)"
         return
     }
 
     argument1_type := lua.type(state, 1)
 
     if argument1_type != .TABLE && argument1_type != .STRING {
-        error_message = "bad argument #1 (files) to older: expected \"string expandable\", got \"%s\""
+        error_message = "bad argument #1 for \"older\" (files): expected \"expandable\", got \"%s\""
         error_arg = lua.typename(state, argument1_type)
         return
     }
 
     if argument_amount < 2 {
-        error_message = "missing argument #2 for older: others (string expandable)"
+        error_message = "missing argument #2 for \"older\": others (expandable)"
         return
     }
 
     argument2_type := lua.type(state, 2)
 
     if argument2_type != .TABLE && argument2_type != .STRING {
-        error_message = "bad argument #2 (others) to older: expected \"string expandable\", got \"%s\""
+        error_message = "bad argument #2 for \"older\" (others): expected \"expandable\", got \"%s\""
         error_arg = lua.typename(state, argument2_type)
         return
     }
@@ -359,7 +457,8 @@ lua_raven_older :: proc "c" (
     files_parts, files_ok := expand_value(state, 1)
 
     if !files_ok {
-        return 0
+        error_message = "could not expand argument #1 for \"older\" (files)"
+        return
     }
 
     defer delete(files_parts)
@@ -367,7 +466,8 @@ lua_raven_older :: proc "c" (
     others_parts, others_ok := expand_value(state, 2)
 
     if !others_ok {
-        return 0
+        error_message = "could not expand argument #2 for \"older\" (others)"
+        return
     }
 
     defer delete(others_parts)
@@ -410,20 +510,467 @@ lua_raven_older :: proc "c" (
         for other_modification_time in others_modification_times {
             if time.diff(file_modification_time, other_modification_time) >= 0.0 {
                 lua.pushboolean(state, true)
-                lua.pushboolean(state, true)
-                return 2
+                return 1
             }
         }
     }
 
     lua.pushboolean(state, false)
-    lua.pushboolean(state, true)
-    return 2
+    return 1
 }
 
-main :: proc(
-) -> (
-) {
+// Expands a glob pattern to a list of items.
+//
+// Parameters:
+// - pattern (string): the grep pattern, according to the syntax of https://pkg.odin-lang.org/core/path/filepath/#match.
+// - filter? (integer): one of the following values:
+//   - raven.EXPAND_FILTER_ALL (default): collect all kinds of items
+//   - raven.EXPAND_FILTER_FILE: collect files only
+//   - raven.EXPAND_FILTER_DIRECTORY: collect directory names only
+lua_raven_expand :: proc "c" (state: ^lua.State) -> (result_count: i32) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != nil {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_count := lua.gettop(state)
+
+    if argument_count < 1 {
+        error_message = "missing argument #1 for \"expand\": pattern (string)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .STRING {
+        error_message = "bad argument #1 for \"expand\" (pattern): expected \"string\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    lua.len(state, 1)
+    argument1_length := lua.tointeger(state, -1)
+    lua.pop(state, 1)
+
+    if argument1_length < 1 {
+        error_message = "bad argument #1 for \"expand\" (pattern): pattern is empty"
+        return
+    }
+
+    filter := Expand_Filter.All
+
+    if argument_count >= 2 {
+        argument2_type := lua.type(state, 2)
+
+        if argument2_type != .NUMBER {
+            error_message = "bad argument #2 for \"expand\" (filter): expected \"expand filter\", got \"%s\""
+            error_arg = lua.typename(state, argument2_type)
+            return
+        }
+
+        filter = Expand_Filter(lua.tointeger(state, 2))
+
+        if int(filter) > len(Expand_Filter) - 1 {
+            error_message = "bad argument #2 for \"expand\" (filter): invalid filter type"
+            error_arg = lua.typename(state, argument2_type)
+            return
+        }
+    }
+
+    pattern := lua_get_string(state, 1)
+
+    matches, match_ok := expand_path(pattern, filter)
+
+    if !match_ok {
+        return 0
+    }
+
+    lua.createtable(state, i32(len(matches)), 0)
+    matches_table_index := lua.gettop(state)
+
+    for i in 0..<len(matches) {
+        match := matches[i]
+        lua.pushlstring(state, cstring(raw_data(match)), len(match))
+        lua.seti(state, matches_table_index, lua.Integer(i + 1))
+    }
+
+    return 1
+}
+
+// Creates a new directory.
+//
+// Parameters:
+// - path (string): path to the directory to create.
+// - recursive? (boolean): if true, create parent directories if they don't exist.
+//
+// Returns:
+// - [1] (error): operation error, if any.
+// - [2]? (string): path for which the error occurred, if any.
+lua_raven_create_directory :: proc "c" (state: ^lua.State) -> (result_count: i32) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != nil {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_count := lua.gettop(state)
+
+    if argument_count < 1 {
+        error_message = "missing argument #1 for \"create_directory\": path (string)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .STRING {
+        error_message = "bad argument #1 for \"create_directory\" (path): expected \"string\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    lua.len(state, 1)
+    argument1_length := lua.tointeger(state, -1)
+    lua.pop(state, 1)
+
+    if argument1_length < 1 {
+        error_message = "bad argument #1 for \"create_directory\" (path): path is empty"
+        return
+    }
+
+    path := lua_get_string(state, 1)
+
+    recursive: b32
+
+    if argument_count > 1 {
+        argument2_type := lua.type(state, 2)
+
+        if argument2_type != .BOOLEAN {
+            error_message = "bad argument #2 for \"create_directory\" (recursive): expected \"boolean\", got \"%s\""
+            error_arg = lua.typename(state, argument2_type)
+            return
+        }
+
+        recursive = lua.toboolean(state, 2)
+    }
+
+    if !recursive {
+        make_directory_err := os.make_directory(path)
+        lua.pushinteger(state, lua.Integer(os_error_to_raven(make_directory_err)))
+        lua.pushlstring(state, cstring(raw_data(path)), len(path))
+        return 2
+    }
+
+    parts, split_err := strings.split(path, "/")
+
+    if split_err != nil {
+        error_message = "could not allocate path parts while recursively creating directory \"%s\""
+        error_arg = path
+        return
+    }
+
+    defer delete(parts)
+
+    for i := 0; i < len(parts); i += 1 {
+        partial_path, join_err := strings.join(parts[:i + 1], "/")
+
+        if join_err != nil {
+            error_message = "could not allocate partial path while recursively creating directory \"%s\""
+            error_arg = path
+            return
+        }
+
+        defer delete(partial_path)
+
+        if os.is_dir(partial_path) {
+            continue
+        }
+
+        make_directory_err := os.make_directory(partial_path)
+
+        if make_directory_err != nil {
+            lua.pushinteger(state, lua.Integer(os_error_to_raven(make_directory_err)))
+            lua.pushlstring(state, cstring(raw_data(partial_path)), len(partial_path))
+            return 2
+        }
+    }
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.None))
+    return 1
+}
+
+remove_directory_recursively :: proc(path: string) -> (err: os.Error, err_path: string) {
+    directory_items: []os.File_Info
+
+    {
+        directory, dir_open_err := os.open(path)
+
+        if dir_open_err != nil {
+            return dir_open_err, path
+        }
+
+        defer os.close(directory)
+
+        read_dir_err: os.Error
+        directory_items, read_dir_err = os.read_dir(directory, -1)
+
+        if read_dir_err != nil {
+            return read_dir_err, path
+        }
+    }
+
+    for directory_item in directory_items {
+        defer os.file_info_delete(directory_item)
+
+        if directory_item.is_dir {
+            remove_err, remove_path := remove_directory_recursively(directory_item.fullpath)
+
+            if remove_err != nil {
+                return remove_err, remove_path
+            }
+        } else {
+            file_remove_err := os.remove(directory_item.fullpath)
+
+            if file_remove_err != nil {
+                return file_remove_err, directory_item.fullpath
+            }
+        }
+    }
+
+    dir_remove_err := os.remove_directory(path)
+
+    if dir_remove_err != nil {
+        return dir_remove_err, path
+    }
+
+    return nil, ""
+}
+
+// Removes directory at path.
+//
+// Parameters:
+// - path (string): path to the directory to remove.
+// - recursive? (boolean): if true, removes the directory recursively.
+//
+// Returns:
+// - [1] (error): operation error, if any.
+// - [2]? (string): path for which the error occurred, if any.
+lua_raven_remove_directory :: proc "c" (state: ^lua.State) -> (result_count: i32) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != "" {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_count := lua.gettop(state)
+
+    if argument_count < 1 {
+        error_message = "missing argument #1 for \"remove_directory\": path (string)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .STRING {
+        error_message = "bad argument #1 for \"remove_directory\" (path): expected \"string\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    lua.len(state, 1)
+    argument1_length := lua.tointeger(state, -1)
+    lua.pop(state, 1)
+
+    if argument1_length < 1 {
+        error_message = "bad argument #1 for \"remove_directory\" (path): path is empty"
+        return
+    }
+
+    path := lua_get_string(state, 1)
+
+    recursive: b32
+
+    if argument_count >= 2 {
+        argument2_type := lua.type(state, 2)
+
+        if argument2_type != .BOOLEAN {
+            error_message = "bad argument #2 for \"remove_directory\" (recursive): expected \"boolean\", got \"%s\""
+            error_arg = lua.typename(state, argument2_type)
+            return
+        }
+
+        recursive = lua.toboolean(state, 2)
+    }
+
+    if !os2.is_directory(path) {
+        lua.pushinteger(state, lua.Integer(Raven_Error.Not_A_Directory))
+        lua.pushlstring(state, cstring(raw_data(path)), len(path))
+        return 2
+    }
+
+    if recursive {
+        remove_err, err_path := remove_directory_recursively(path)
+
+        if remove_err != nil {
+            lua.pushinteger(state, lua.Integer(Raven_Error.Not_A_Directory))
+            lua.pushlstring(state, cstring(raw_data(err_path)), len(err_path))
+            return 2
+        }
+    } else {
+        remove_err := os.remove_directory(path)
+
+        if remove_err != nil {
+            lua.pushinteger(state, lua.Integer(os_error_to_raven(remove_err)))
+            lua.pushlstring(state, cstring(raw_data(path)), len(path))
+            return 2
+        }
+    }
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.None))
+    return 1
+}
+
+// Creates a file.
+//
+// Parameters:
+// - path (string): path to the file to create.
+//
+// Returns:
+// - [1] (error): operation error, if any.
+lua_raven_create_file :: proc "c" (state: ^lua.State) -> (result_count: i32) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != "" {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_count := lua.gettop(state)
+
+    if argument_count < 1 {
+        error_message = "missing argument #1 for \"create_file\": path (string)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .STRING {
+        error_message = "bad argument #1 for \"create_file\" (path): expected \"string\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    lua.len(state, 1)
+    argument1_length := lua.tointeger(state, -1)
+    lua.pop(state, 1)
+
+    if argument1_length < 1 {
+        error_message = "bad argument #1 for \"create_file\" (path): path is empty"
+        return
+    }
+
+    path := lua_get_string(state, 1)
+
+    file_handle, create_err := os.open(path, os.O_CREATE)
+    os.close(file_handle)
+
+    lua.pushinteger(state, lua.Integer(os_error_to_raven(create_err)))
+    return 1
+}
+
+Exists_Filter :: enum {
+    File,
+    Directory,
+}
+
+// Checks if a filesystem item exists.
+//
+// Parameters:
+// - path (string): path to the item to search for.
+// - filter? (integer): one of the following values:
+//   - raven.EXISTS_FILTER_FILE (default): check for a file
+//   - raven.EXISTS_FILTER_DIRECTORY: check for a directory
+//
+// Returns:
+// - [1] (boolean): true if the item exists, false otherwise.
+lua_raven_exists :: proc "c" (state: ^lua.State) -> (result_count: i32) {
+    context = runtime.default_context()
+
+    error_message: cstring
+    error_arg: any
+
+    defer if error_message != "" {
+        lua.L_error(state, error_message, error_arg)
+    }
+
+    argument_count := lua.gettop(state)
+
+    if argument_count < 1 {
+        error_message = "missing argument #1 for \"exists\": path (string)"
+        return
+    }
+
+    argument1_type := lua.type(state, 1)
+
+    if argument1_type != .STRING {
+        error_message = "bad argument #1 for \"exists\" (path): expected \"string\", got \"%s\""
+        error_arg = lua.typename(state, argument1_type)
+        return
+    }
+
+    lua.len(state, 1)
+    argument1_length := lua.tointeger(state, -1)
+    lua.pop(state, 1)
+
+    if argument1_length < 1 {
+        error_message = "bad argument #1 for \"exists\" (path): path is empty"
+        return
+    }
+
+    path := lua_get_string(state, 1)
+
+    filter_type: Exists_Filter
+
+    if argument_count > 1 {
+        if !lua.isinteger(state, 2) {
+            error_message = "bad argument #2 for \"exists\" (filter): expected \"number\", got \"%s\""
+            error_arg = lua.L_typename(state, 2)
+            return
+        }
+
+        filter_int := lua.tointeger(state, 2)
+
+        if filter_int >= len(Exists_Filter) {
+            error_message = "bad argument #2 for \"exists\" (filter): invalid filter type (%d)"
+            error_arg = filter_int
+            return
+        }
+
+        filter_type = Exists_Filter(filter_int)
+    }
+
+    switch filter_type {
+    case .File:
+        lua.pushboolean(state, b32(os2.is_file(path)))
+    case .Directory:
+        lua.pushboolean(state, b32(os2.is_dir(path)))
+    }
+
+    return 1
+}
+
+main :: proc() {
     when MEASURE_PERFORMANCE {
         total_duration_milliseconds: f64 = 0.0
         base_time := time.now()
@@ -444,7 +991,7 @@ main :: proc(
     if len(os.args) > 1 {
         command_section_start := 1
 
-        for arg, i in os.args[1:] {
+        for arg in os.args[1:] {
             if !strings.starts_with(arg, "-") {
                 break
             }
@@ -517,11 +1064,153 @@ main :: proc(
     lua.pushcfunction(state, lua_raven_run)
     lua.setfield(state, raven_table_index, "run")
 
+    lua.pushcfunction(state, lua_raven_demand_argument_amount)
+    lua.setfield(state, raven_table_index, "demand_argument_amount")
+
     lua.pushcfunction(state, lua_raven_older)
     lua.setfield(state, raven_table_index, "older")
 
-    lua.pushcfunction(state, lua_raven_demand_argument_amount)
-    lua.setfield(state, raven_table_index, "demand_argument_amount")
+    lua.pushcfunction(state, lua_raven_expand)
+    lua.setfield(state, raven_table_index, "expand")
+
+    lua.pushcfunction(state, lua_raven_create_directory)
+    lua.setfield(state, raven_table_index, "create_directory")
+
+    lua.pushcfunction(state, lua_raven_remove_directory)
+    lua.setfield(state, raven_table_index, "remove_directory")
+
+    // NOTE(volatus): not needed right now because you can use io.open()
+    // lua.pushcfunction(state, lua_raven_create_file)
+    // lua.setfield(state, raven_table_index, "create_file")
+
+    lua.pushcfunction(state, lua_raven_exists)
+    lua.setfield(state, raven_table_index, "exists")
+
+    lua.pushinteger(state, lua.Integer(Expand_Filter.All))
+    lua.setfield(state, raven_table_index, "EXPAND_FILTER_ALL")
+
+    lua.pushinteger(state, lua.Integer(Expand_Filter.File))
+    lua.setfield(state, raven_table_index, "EXPAND_FILTER_FILE")
+
+    lua.pushinteger(state, lua.Integer(Expand_Filter.Directory))
+    lua.setfield(state, raven_table_index, "EXPAND_FILTER_DIRECTORY")
+
+    lua.pushinteger(state, lua.Integer(Exists_Filter.File))
+    lua.setfield(state, raven_table_index, "EXISTS_FILTER_FILE")
+
+    lua.pushinteger(state, lua.Integer(Exists_Filter.Directory))
+    lua.setfield(state, raven_table_index, "EXISTS_FILTER_DIRECTORY")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.None))
+    lua.setfield(state, raven_table_index, "ERROR_NONE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Permission_Denied))
+    lua.setfield(state, raven_table_index, "ERROR_PERMISSION_DENIED")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Exists))
+    lua.setfield(state, raven_table_index, "ERROR_EXISTS")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Does_Not_Exist))
+    lua.setfield(state, raven_table_index, "ERROR_DOES_NOT_EXIST")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Closed))
+    lua.setfield(state, raven_table_index, "ERROR_CLOSED")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Timeout))
+    lua.setfield(state, raven_table_index, "ERROR_TIMEOUT")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Broken_Pipe))
+    lua.setfield(state, raven_table_index, "ERROR_BROKEN_PIPE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.No_Size))
+    lua.setfield(state, raven_table_index, "ERROR_NO_SIZE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_File))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_FILE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Directory))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_DIRECTORY")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Path))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_PATH")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Callback))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_CALLBACK")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Pattern_Has_Separator))
+    lua.setfield(state, raven_table_index, "ERROR_PATTERN_HAS_SEPARATOR")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Unsupported))
+    lua.setfield(state, raven_table_index, "ERROR_UNSUPPORTED")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.File_Is_Pipe))
+    lua.setfield(state, raven_table_index, "ERROR_FILE_IS_PIPE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Not_A_Directory))
+    lua.setfield(state, raven_table_index, "ERROR_NOT_A_DIRECTORY")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.EOF))
+    lua.setfield(state, raven_table_index, "ERROR_EOF")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Unexpected_EOF))
+    lua.setfield(state, raven_table_index, "ERROR_UNEXPECTED_EOF")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Short_Write))
+    lua.setfield(state, raven_table_index, "ERROR_SHORT_WRITE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Write))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_WRITE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Short_Buffer))
+    lua.setfield(state, raven_table_index, "ERROR_SHORT_BUFFER")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.No_Progress))
+    lua.setfield(state, raven_table_index, "ERROR_NO_PROGRESS")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Whence))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_WHENCE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Offset))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_OFFSET")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Unread))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_UNREAD")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Negative_Read))
+    lua.setfield(state, raven_table_index, "ERROR_NEGATIVE_READ")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Negative_Write))
+    lua.setfield(state, raven_table_index, "ERROR_NEGATIVE_WRITE")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Negative_Count))
+    lua.setfield(state, raven_table_index, "ERROR_NEGATIVE_COUNT")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Buffer_Full))
+    lua.setfield(state, raven_table_index, "ERROR_BUFFER_FULL")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Unknown))
+    lua.setfield(state, raven_table_index, "ERROR_UNKNOWN")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Empty))
+    lua.setfield(state, raven_table_index, "ERROR_EMPTY")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Out_Of_Memory))
+    lua.setfield(state, raven_table_index, "ERROR_OUT_OF_MEMORY")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Pointer))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_POINTER")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Invalid_Argument))
+    lua.setfield(state, raven_table_index, "ERROR_INVALID_ARGUMENT")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Mode_Not_Implemented))
+    lua.setfield(state, raven_table_index, "ERROR_MODE_NOT_IMPLEMENTED")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Platform_Error))
+    lua.setfield(state, raven_table_index, "ERROR_PLATFORM_ERROR")
+
+    lua.pushinteger(state, lua.Integer(Raven_Error.Path_Has_Separator))
+    lua.setfield(state, raven_table_index, "ERROR_PATH_HAS_SEPARATOR")
 
     lua.createtable(state, i32(len(os.args) - 2), 0)
 
