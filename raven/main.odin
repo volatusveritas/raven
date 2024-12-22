@@ -8,6 +8,7 @@ import "core:os"
 import "core:os/os2"
 import "core:strings"
 import "core:time"
+import "core:bufio"
 
 import lua "vendor:lua/5.4"
 
@@ -1273,13 +1274,22 @@ main :: proc() {
 
         print_msg(.RAVEN, "Commands in ravenfile:")
 
+        writer: bufio.Writer
+        bufio.writer_init(&writer, os.stream_from_handle(os.stdout))
+
         lua.pushnil(state)
         for lua.next(state, commands_index) != 0 {
             lua.pushvalue(state, -2)
-            command_name := lua.tostring(state, -1)
+            command_name := lua_get_string(state, -1)
             lua.pop(state, 2)
-            fmt.printfln("- %s%s%s", COLOR_IDENTIFIER, command_name, COLOR_RESET)
+            bufio.writer_write_string(&writer, "- ")
+            bufio.writer_write_string(&writer, COLOR_IDENTIFIER)
+            bufio.writer_write_string(&writer, command_name)
+            bufio.writer_write_string(&writer, COLOR_RESET)
+            bufio.writer_write_byte(&writer, '\n')
         }
+
+        bufio.writer_flush(&writer)
     } else if command_args == nil {
         {
             lua.getglobal(state, "raven")
