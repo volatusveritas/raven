@@ -1280,7 +1280,17 @@ main :: proc() {
             lua.pop(state, 2)
             fmt.printfln("- %s%s%s", COLOR_IDENTIFIER, command_name, COLOR_RESET)
         }
-    } else if command_args != nil {
+    } else if command_args == nil {
+        {
+            lua.getglobal(state, "raven")
+            raven_index := lua.gettop(state)
+            defer lua.remove(state, raven_index)
+
+            lua.getfield(state, -1, "default")
+        }
+
+        lua.call(state, 0, 0)
+    } else {
         {
             lua.getglobal(state, "raven")
             raven_index := lua.gettop(state)
