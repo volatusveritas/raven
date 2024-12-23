@@ -971,6 +971,17 @@ lua_raven_exists :: proc "c" (state: ^lua.State) -> (result_count: i32) {
     return 1
 }
 
+push_raven_table :: proc(state: ^lua.State) -> (index: i32, ok: bool) {
+    lua.getglobal(state, "raven")
+
+    if lua.type(state, -1) != .TABLE {
+        print_error(.RAVEN, "invalid type for \"raven\": expected table, got %s", lua.L_typename(state, -1))
+        return 0, false
+    }
+
+    return lua.gettop(state), true
+}
+
 main :: proc() {
     when MEASURE_PERFORMANCE {
         total_duration_milliseconds: f64 = 0.0
@@ -993,7 +1004,7 @@ main :: proc() {
         command_section_start := 1
 
         for arg in os.args[1:] {
-            if !strings.starts_with(arg, "-") {
+            if !strings.starts_with(arg, "-") || arg == "--" {
                 break
             }
 
@@ -1213,16 +1224,19 @@ main :: proc() {
     lua.pushinteger(state, lua.Integer(Raven_Error.Path_Has_Separator))
     lua.setfield(state, raven_table_index, "ERROR_PATH_HAS_SEPARATOR")
 
-    lua.createtable(state, i32(len(os.args) - 2), 0)
+    {
+        args_offset := (len(command_args) > 0 && command_args[0] == "--") ? 1 : 0
 
-    if len(command_args) > 1 {
-        for arg, i in command_args[1:] {
-            lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
-            lua.seti(state, -2, lua.Integer(i + 1))
+        lua.createtable(state, i32(len(command_args) - args_offset), 0)
+        defer lua.setfield(state, raven_table_index, "args")
+
+        if len(command_args) > args_offset {
+            for arg, i in command_args[args_offset:] {
+                lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
+                lua.seti(state, -2, lua.Integer(i + 1))
+            }
         }
     }
-
-    lua.setfield(state, raven_table_index, "args")
 
     lua.setglobal(state, "raven")
 
@@ -1290,38 +1304,92 @@ main :: proc() {
         }
 
         bufio.writer_flush(&writer)
-    } else if command_args == nil {
-        {
-            lua.getglobal(state, "raven")
-            raven_index := lua.gettop(state)
-            defer lua.remove(state, raven_index)
+    } else if command_args == nil || command_args[0] == "--" {
+        raven_table_index, raven_table_ok := push_raven_table(state)
 
-            lua.getfield(state, -1, "default")
-        }
-
-        lua.call(state, 0, 0)
-    } else {
-        {
-            lua.getglobal(state, "raven")
-            raven_index := lua.gettop(state)
-            defer lua.remove(state, raven_index)
-
-            lua.getfield(state, -1, "commands")
-            raven_commands_index := lua.gettop(state)
-            defer lua.remove(state, raven_commands_index)
-
-            command_name_cstr := strings.clone_to_cstring(command_args[0])
-            defer delete(command_name_cstr)
-
-            lua.getfield(state, raven_commands_index, command_name_cstr)
-        }
-
-        if lua.type(state, -1) != .FUNCTION {
-            print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, command_args[0], COLOR_RESET)
+        if !raven_table_ok {
             return
         }
 
+        lua.getfield(state, -1, "default")
+
+        if lua.type(state, -1) == .NIL {
+            print_error(.RAVEN, "no default command set")
+            return
+        }
+
+        if lua.type(state, -1) != .FUNCTION {
+            print_error(.RAVEN, "invalid type for raven.default (expected function, got %s)", lua.L_typename(state, -1))
+            return
+        }
+
+        lua.createtable(state, i32(len(command_args) - 1), 0)
+
+        if len(command_args) > 1 {
+            for arg, i in command_args[1:] {
+                lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
+                lua.seti(state, -2, lua.Integer(i + 1))
+            }
+        }
+
+        lua.setfield(state, raven_table_index, "cmd_args")
+
         lua.call(state, 0, 0)
+    } else {
+        _, raven_table_ok := push_raven_table(state)
+
+        if !raven_table_ok {
+            return
+        }
+
+        lua.getfield(state, -1, "commands")
+
+        if lua.type(state, -1) != .TABLE {
+            print_error(.RAVEN, "invalid type for raven.commands (expected table, got %s)", lua.L_typename(state, -1))
+            return
+        }
+
+        command_name_cstr := strings.clone_to_cstring(command_args[0])
+        lua.getfield(state, -1, command_name_cstr)
+        delete(command_name_cstr)
+
+        command_found := lua.type(state, -1) == .FUNCTION
+
+        if !command_found {
+            if lua.type(state, -1) != .NIL {
+                print_error(.RAVEN, "invalid type for raven command \"%s\" (expected function, got %s)", command_args[0], lua.L_typename(state, -1))
+                return
+            }
+
+            lua.pop(state, 2)
+        }
+
+        cmd_args_offset := command_found ? 1 : 0
+        lua.createtable(state, i32(len(command_args) - cmd_args_offset), 0)
+
+        if len(command_args) > cmd_args_offset {
+            for arg, i in command_args[cmd_args_offset:] {
+                lua.pushlstring(state, cstring(raw_data(arg)), len(arg))
+                lua.seti(state, -2, lua.Integer(i + 1))
+            }
+        }
+
+        lua.setfield(state, raven_table_index, "cmd_args")
+
+        if command_found {
+            lua.call(state, 0, 0)
+        } else {
+            lua.getfield(state, -1, "default")
+
+            #partial switch lua.type(state, -1) {
+            case .FUNCTION:
+                lua.call(state, 0, 0)
+            case .NIL:
+                print_error(.RAVEN, "could not find command %s\"%s\"%s", COLOR_IDENTIFIER, command_args[0], COLOR_RESET)
+            case:
+                print_error(.RAVEN, "invalid type for raven.default (expected function, got %s)", lua.L_typename(state, -1))
+            }
+        }
 
         when MEASURE_PERFORMANCE {
             issued_command_duration := time.duration_milliseconds(time.since(base_time))
